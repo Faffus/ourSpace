@@ -4,8 +4,10 @@ export class UserInput {
     public canvas: HTMLCanvasElement;
     public screenW: number = 0;
     public screenH: number = 0;
-    public xMoveDirection: number = 0;
-    public yMoveDirection: number = 0;
+    public moveDirectionX: number = 0;
+    public moveDirectionY: number = 0;
+    public mouseX: number = 0;
+    public mouseY: number = 0;
     public zoom: number = 1;
 
     private up: boolean = false;
@@ -16,8 +18,6 @@ export class UserInput {
     constructor(canvas: HTMLCanvasElement) {
         this.canvas = canvas;
 
-        this.screenW = 0;
-        this.screenH = 0;
         const resize = () => {
             this.canvas.width = window.innerWidth; 
             this.canvas.height = window.innerHeight;
@@ -48,8 +48,21 @@ export class UserInput {
         });
 
         window.addEventListener("blur", () => {
-            this.xMoveDirection = 0;
-            this.yMoveDirection = 0;
+            this.moveDirectionX = 0;
+            this.moveDirectionY = 0;
+        });
+
+        this.canvas.addEventListener('pointermove', (event: PointerEvent) => {
+            const bounds = this.canvas.getBoundingClientRect();
+            
+            const rawX = event.clientX - bounds.left;
+            const rawY = event.clientY - bounds.top;
+
+            const scaleX = this.canvas.width / bounds.width;
+            const scaleY = this.canvas.height / bounds.height;
+
+            this.mouseX = rawX * scaleX;
+            this.mouseY = rawY * scaleY;
         });
 
         window.addEventListener('wheel', (event) => {
@@ -66,11 +79,11 @@ export class UserInput {
     }
 
     updateMoveDirections() {
-        this.xMoveDirection = 0;
-        this.yMoveDirection = 0;
-        if (this.up) this.yMoveDirection -= 1;
-        if (this.left) this.xMoveDirection -= 1;
-        if (this.down) this.yMoveDirection += 1;
-        if (this.right) this.xMoveDirection += 1;
+        this.moveDirectionX = 0;
+        this.moveDirectionY = 0;
+        if (this.up) this.moveDirectionY -= 1;
+        if (this.left) this.moveDirectionX -= 1;
+        if (this.down) this.moveDirectionY += 1;
+        if (this.right) this.moveDirectionX += 1;
     }
 }

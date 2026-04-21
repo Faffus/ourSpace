@@ -1,6 +1,7 @@
 import { GameServer, GameClient } from "./game";
 import { UserInput } from "../client/user-input";
 import { GuessGameClient, GuessGameServer } from "./guess";
+import { PongClient, PongServer } from "./multi-pong";
 
 export type GameInfo = {
     client: new (userInput: UserInput, myId: string) => GameClient;
@@ -14,9 +15,9 @@ export const GAMES: Record<string, GameInfo> = {
         server: GuessGameServer,
         name: 'Guess the number'
     },
-    otherGame: {
-        client: GuessGameClient,
-        server: GuessGameServer,
-        name: 'Number guess'
+    pong: {
+        client: PongClient,
+        server: PongServer,
+        name: 'Pong'
     }
 }

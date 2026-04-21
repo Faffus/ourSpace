@@ -234,9 +234,11 @@ export class LobbyServer {
             }
             else if (payload.kind === "move") {
                 const person = this.people[clientId]
-                person.x = payload.x 
-                person.y = payload.y
-                updatedPeople[clientId] = person;
+                if (person) {
+                    person.x = payload.x
+                    person.y = payload.y
+                    updatedPeople[clientId] = person;
+                }
             }
             else if (payload.kind === "gameProposal") {
                 this.handleGameProposal(clientId, payload.gameKey);
@@ -455,12 +457,12 @@ export class LobbyClient {
     private drawLobby(ctx: CanvasRenderingContext2D, me: ClientPerson, dt: number) {
         const {
             screenW, screenH, zoom,
-            xMoveDirection, yMoveDirection
+            moveDirectionX, moveDirectionY
         } = this.userInput;
 
         // gestione movimento
-        me.xTarget = me.xTarget + xMoveDirection * dt * PERSON_SPEED;
-        me.yTarget = me.yTarget + yMoveDirection * dt * PERSON_SPEED;
+        me.xTarget = me.xTarget + moveDirectionX * dt * PERSON_SPEED;
+        me.yTarget = me.yTarget + moveDirectionY * dt * PERSON_SPEED;
 
         // controllo che il giocatore non esca dallo spazio di gioco
         if (me.yTarget - PERSON_H/2 < worldBounds.top) me.yTarget = worldBounds.top + PERSON_H/2 + EPSILON;
@@ -630,8 +632,9 @@ export class LobbyClient {
 
 export function drawPersonName(ctx: CanvasRenderingContext2D, person: Person) {
     const fontSize = Math.floor(PERSON_H * 0.15);
-    const nameY = person.y - PERSON_H/2 - fontSize - PERSON_H*0.08;
     ctx.font = `${fontSize}px Arial`;
+
+    const nameY = person.y - PERSON_H/2 - fontSize - PERSON_H*0.08;
     const nameWidth = ctx.measureText(person.name).width;
     const padding = 4;
 
@@ -642,6 +645,7 @@ export function drawPersonName(ctx: CanvasRenderingContext2D, person: Person) {
         nameWidth + (padding * 2), 
         fontSize + (padding * 2)
     );
+
     ctx.textAlign = "center";
     ctx.textBaseline = "top";
     ctx.lineWidth = 4;
