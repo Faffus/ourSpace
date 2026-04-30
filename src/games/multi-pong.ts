@@ -74,6 +74,7 @@ export class PongServer extends GameServer {
 
         // iteriamo l'array di palle partendo dalla fine, cosi' possiamo
         // eliminare quelle che escono dai bordi destro e sinisto
+        let collided = false;
         for (let i = this.balls.length - 1; i >= 0; i--) {
             const ball = this.balls[i]
             ball.x += ball.vx * dt;
@@ -97,7 +98,7 @@ export class PongServer extends GameServer {
                 this.balls.splice(i, 1);
             }
 
-            this.handleBallToPlayerCollisions(ball);
+            if (this.handleBallToPlayerCollisions(ball)) collided = true;
         };
 
         return [{
@@ -105,9 +106,10 @@ export class PongServer extends GameServer {
                 players: this.players,
                 balls: this.balls,
                 leftScore: this.leftScore,
-                rightScore: this.rightScore
+                rightScore: this.rightScore,
+                ballPlayerCollision: collided
             }
-        }]
+        }];
     }
 
     isFinished(): boolean {
@@ -115,7 +117,8 @@ export class PongServer extends GameServer {
             || this.rightScore == WINNING_SCORE;
     }
 
-    handleBallToPlayerCollisions(ball) {
+    handleBallToPlayerCollisions(ball): boolean {
+        let collided = false;
         Object.keys(this.players).forEach(id => {
             const player = this.players[id];
             const playerRect = { x: player.x, y: player.y, w: PLAYER_W, h: PLAYER_H };
@@ -138,7 +141,11 @@ export class PongServer extends GameServer {
                 ball.vx *= -1;
                 ball.x = player.x + PLAYER_W + BALL_RADIUS;
             }
+
+            collided ||= side !== "none";
         });
+
+        return collided;
     }
 }
 
@@ -154,7 +161,11 @@ export class PongClient extends GameClient {
         super(userInput, myId);
     }
 
-    init(players) {
+    async init(players) {
+        const folder = '/assets/multi-pong';
+        await this.assets.loadImage('ball', `${folder}/soccer-ball.png`);
+        this.assets.loadSound('bump', `${folder}/bump.mp3`);
+        return Promise.resolve();
     }
 
     draw(ctx: CanvasRenderingContext2D, dt: number) {
@@ -194,10 +205,13 @@ export class PongClient extends GameClient {
         });
 
         this.balls.forEach(ball => {
-            ctx.fillStyle = "#4500ce";
-            ctx.beginPath();
-            ctx.arc(ball.x, ball.y, BALL_RADIUS, 0, 2*Math.PI);
-            ctx.fill();
+            ctx.drawImage(
+                this.assets.images.ball, 
+                ball.x - BALL_RADIUS, // Shift left by radius
+                ball.y - BALL_RADIUS, // Shift up by radius
+                BALL_RADIUS * 2,      // Width is diameter
+                BALL_RADIUS * 2       // Height is diameter
+            );
         });
 
         ctx.restore();
@@ -228,6 +242,13 @@ export class PongClient extends GameClient {
         this.balls = message.balls;
         this.leftScore = message.leftScore;
         this.rightScore = message.rightScore;
+
+        if (message.ballPlayerCollision) {
+            const bumpSound = this.assets.sounds.bump;
+            bumpSound.volume = 0.5;
+            bumpSound.currentTime = 0;
+            bumpSound.play().catch(err => console.log("Waiting for user interaction to play audio"));
+        }
     }
 
     flushMessages(): any[] {

@@ -180,6 +180,7 @@ export class GuessGameClient extends GameClient {
 
     init(players: Record<string, Player>) {
         this.players = players;
+        return Promise.resolve();
     }
 
     draw(ctx: CanvasRenderingContext2D, dt: number) {
