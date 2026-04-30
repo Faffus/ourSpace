@@ -11,6 +11,7 @@ export abstract class ClickableRectangle {
         this.userInput = userInput;
         this.rect = { x: 0, y: 0, w: 0, h: 0 };
         this.onClickCallback = onClickCallback;
+        this.transformMatrix = new DOMMatrix();
 
         userInput.canvas.addEventListener('pointerdown', e => this.onPointerDown(e));
         userInput.canvas.addEventListener('pointerup', e => this.onPointerUp(e));
@@ -33,9 +34,10 @@ export abstract class ClickableRectangle {
         const canvasMouseY = rawY * scaleY;
 
         const mousePoint = new DOMPoint(canvasMouseX, canvasMouseY);
-        const invertedMatrix = this.transformMatrix.inverse();
-        const localPoint = mousePoint.matrixTransform(invertedMatrix);
+        const invertedMatrix = this.transformMatrix?.inverse?.();
+        if (!invertedMatrix) return false;
 
+        const localPoint = mousePoint.matrixTransform(invertedMatrix);
         const rect = this.rect;
         return localPoint.x >= rect.x && localPoint.x <= rect.x + rect.w &&
                localPoint.y >= rect.y && localPoint.y <= rect.y + rect.h;
