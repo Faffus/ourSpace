@@ -510,7 +510,7 @@ export class LobbyClient {
         this.gamesBtn.draw(ctx, screenW - 110, 10, 100, 30);
     }
 
-    handleMessage(message: LobbyServerMsg) {
+    async handleMessage(message: LobbyServerMsg) {
         if (message.kind === "gameStarted") {
             this.gameSelect.scratchGameProposal();
             this.gameSelect.hide();
@@ -521,7 +521,7 @@ export class LobbyClient {
             const gameInfo = GAMES[message.gameKey];
             if (!gameInfo) return;
             this.currentGame = new gameInfo.client(this.userInput, this.myId!);
-            this.currentGame.init(message.players);
+            await this.currentGame.init(message.players);
             this.currentGameId = message.gameId;
         }
         else if (message.kind === "gameProposal") {

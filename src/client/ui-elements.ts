@@ -11,6 +11,7 @@ export abstract class ClickableRectangle {
         this.userInput = userInput;
         this.rect = { x: 0, y: 0, w: 0, h: 0 };
         this.onClickCallback = onClickCallback;
+        this.transformMatrix = new DOMMatrix();
 
         userInput.canvas.addEventListener('pointerdown', e => this.onPointerDown(e));
         userInput.canvas.addEventListener('pointerup', e => this.onPointerUp(e));
