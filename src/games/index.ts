@@ -2,6 +2,8 @@ import { GameServer, GameClient } from "./game";
 import { UserInput } from "../client/user-input";
 import { GuessGameClient, GuessGameServer } from "./guess";
 import { PongClient, PongServer } from "./multi-pong";
+import { BrawlClient , BrawlServer } from "./brawl";
+
 
 export type GameInfo = {
     client: new (userInput: UserInput, myId: string) => GameClient;
@@ -19,5 +21,10 @@ export const GAMES: Record<string, GameInfo> = {
         client: PongClient,
         server: PongServer,
         name: 'Pong'
+    },
+    brawl: {
+        client: BrawlClient,
+        server: BrawlServer,
+        name: 'TOTAL STK BATTLE 67'
     }
 }
