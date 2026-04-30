@@ -15,6 +15,7 @@ const BORDERS_H = Math.abs(BORDERS.top - BORDERS.bottom);
 export class shooterServer extends GameServer{
     private players
     private zombies
+    private wawes
     private projectiles
     private score
     private highScore 
@@ -31,7 +32,23 @@ export class shooterServer extends GameServer{
             player.y = 0;
 
         })
+
+        this.zombies = [
+            //TODO posizione random
+            {
+                x: BORDERS.left,
+                y: BORDERS.top,
+                vita: 100
+            },
+            {
+                x: BORDERS.right,
+                y: BORDERS.bottom,
+                vita: 100
+            },
+        ];
     }
+
+    
     tick(incomingMessages: IncomingMsg[], dt: number): OutgoingMsg[] {
         
         //messaggio move
@@ -50,6 +67,7 @@ export class shooterServer extends GameServer{
         return [{
             payload: {
                 players: this.players,
+                zombies: this.zombies,
             }
         }]
     }
@@ -61,6 +79,7 @@ import { UserInput } from '../client/user-input';
 
 export class shooterClient extends GameClient {
     private players = null;
+    private zombies = null;
 
     constructor(userInput: UserInput, myId: string) {
         super(userInput, myId);
@@ -75,6 +94,7 @@ export class shooterClient extends GameClient {
                 y: 0
             };
         });
+        return Promise.resolve()
     }
 
     draw(ctx: CanvasRenderingContext2D, dt: number) {
@@ -118,6 +138,11 @@ export class shooterClient extends GameClient {
             ctx.fillRect(player.x - playerSize / 2, player.y - playerSize / 2, playerSize, playerSize);
         });
 
+        this.zombies.forEach(zombie => {
+            const zombieSize = 0.08
+            ctx.fillStyle = "#112fd8c0"
+            ctx.fillRect(zombie.x - zombieSize / 2, zombie.y - zombieSize / 2, zombieSize, zombieSize)
+        });
         ctx.restore();
     }
     handleMessage(message: any) {
@@ -132,7 +157,9 @@ export class shooterClient extends GameClient {
                     this.players[id].y = newPlayer.y;
                 }
             });
+
         }
+        this.zombies = message.zombies;
     }
     flushMessages(): any[] {
         if (this.players === null) return [];
