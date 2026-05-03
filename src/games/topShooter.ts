@@ -9,6 +9,16 @@ const BORDERS = {
     left: -2,
     right: 2
 }
+//-------------------TEST-------------------------
+function mouseDown(event:MouseEvent):void{
+            var x: number = event.x 
+            var y: number = event.y 
+
+            
+
+            console.log('x=' + x + ', y=' + y)
+        }
+
 const BORDERS_W = Math.abs(BORDERS.right - BORDERS.left);
 const BORDERS_H = Math.abs(BORDERS.top - BORDERS.bottom);
 
@@ -193,12 +203,13 @@ export class shooterClient extends GameClient {
             ctx.fillRect(zombie.x - zombieSize / 2, zombie.y - zombieSize / 2, zombieSize, zombieSize)
         });
 
-        //-------------------LOGICA DISEGNO PROIETTILI----------------------
+        /*-------------------LOGICA DISEGNO PROIETTILI----------------------
         this.projectiles.forEach(projectile => {
             const projectileSize = 0.04
             ctx.fillStyle = "rgb(245, 230, 19)"
             ctx.arc(projectile.x-projectileSize/2, projectile.y-projectileSize/2, projectileSize, projectileSize/2, projectileSize/2)
         })
+            */
         ctx.restore();
     }
     handleMessage(message: any) {
@@ -216,6 +227,8 @@ export class shooterClient extends GameClient {
 
         }
         this.zombies = message.zombies;
+        addEventListener("mousedown", mouseDown, false)
+        
     }
     flushMessages(): any[] {
         if (this.players === null) return [];
