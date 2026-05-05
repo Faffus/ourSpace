@@ -4,7 +4,7 @@
   "description": "a digital space to hang",
   "main": "node server.js",
   "scripts": {
-    "build:client": "esbuild src/client/index.ts --bundle --global-name=ourSpace --outfile=build/public/index.js && cp src/client/index.html build/public",
+    "build:client": "esbuild src/client/index.ts --bundle --global-name=ourSpace --outfile=build/public/index.js && node -e \"require('fs').copyFileSync('src/client/index.html','build/public/index.html')\"",
     "build:server": "tsc",
     "build": "npm run build:client && npm run build:server",
     "start": "node build/server.js",

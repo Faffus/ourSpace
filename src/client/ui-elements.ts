@@ -33,8 +33,9 @@ export abstract class ClickableRectangle {
         const canvasMouseY = rawY * scaleY;
 
         const mousePoint = new DOMPoint(canvasMouseX, canvasMouseY);
-        const invertedMatrix = this.transformMatrix.inverse();
-        const localPoint = mousePoint.matrixTransform(invertedMatrix);
+        const localPoint = this.transformMatrix
+            ? mousePoint.matrixTransform(this.transformMatrix.inverse())
+            : mousePoint;
 
         const rect = this.rect;
         return localPoint.x >= rect.x && localPoint.x <= rect.x + rect.w &&
