@@ -20,7 +20,7 @@ const ZOMBIE_SPEED = 0.5;
 const PLAYER_SPEED = 1.3;
 const PLAYER_SIZE = 0.08;
 const ZOMBIE_SIZE = 0.08;
-const PROJECTILE_SIZE = 0.04;
+const PROJECTILE_RADIUS = 0.02;
 const FIRE_RATE = 0.4 
 
 export class shooterServer extends GameServer {
@@ -141,6 +141,43 @@ export class shooterServer extends GameServer {
             }
         });
 
+         //gestione collisioni player zombie 
+         //gestione collisione proiettile zombie
+         let collided = false 
+         for(let i = this.projectiles.length -1; i>= 0; i--){
+            const projectile = this.projectiles[i];
+
+            for(let j = this.zombies.length -1; j>=0; j--){
+                const zombie = this.zombies[j];
+                const ballRect = { 
+                    x: projectile.x - PROJECTILE_RADIUS, 
+                    y: projectile.y - PROJECTILE_RADIUS, 
+                    w: PROJECTILE_RADIUS * 2, 
+                    h: PROJECTILE_RADIUS * 2 
+                };
+                const zombieRect = { 
+                    x: zombie.x - ZOMBIE_SIZE / 2, 
+                    y: zombie.y - ZOMBIE_SIZE / 2, 
+                    w: ZOMBIE_SIZE, 
+                    h: ZOMBIE_SIZE 
+                };
+
+                if(getCollisionSide(ballRect, zombieRect) !== 'none'){
+                    zombie.vita -= 25
+                    console.log("zombie vita: " + zombie.vita);
+
+                    this.projectiles.slice(i, 1);
+
+                    if(zombie.vita <= 0){
+                        this.zombies.splice(j,1);
+                        this.score += 1;
+                    }
+
+                    break;
+                }
+            }
+         }
+
         return [{
             payload: {
                 players: this.players,
@@ -151,6 +188,7 @@ export class shooterServer extends GameServer {
     }
 
     isFinished(): boolean { return false; }
+    
 }
 import { UserInput } from '../client/user-input';
 
@@ -243,7 +281,7 @@ export class shooterClient extends GameClient {
             this.projectiles.forEach(projectile => {
                 ctx.fillStyle = "rgba(248, 232, 5, 0.99)";
                 ctx.beginPath();
-                ctx.arc(projectile.x, projectile.y, PROJECTILE_SIZE / 2, 0, Math.PI * 2);
+                ctx.arc(projectile.x, projectile.y, PROJECTILE_RADIUS, 0, Math.PI * 2);
                 ctx.fill();
             });
         }
