@@ -25,7 +25,7 @@ export class CharacterSelect {
         this.characterNames = getCharacterNames();
         this.selectedCharacterIndex = 0;
         
-        this.nameInput = new TextInput(userInput, 'nickname');
+        this.nameInput = new TextInput(userInput, 'nickname', 20);
         
         this.leftBtn = new Button('<', userInput, () => {
             this.selectedCharacterIndex = mod(this.selectedCharacterIndex + 1, this.characterNames.length);
@@ -38,7 +38,7 @@ export class CharacterSelect {
         this.okBtn = new Button('ok', userInput, () => {
             if (this.selectionIsDone) return; // bad hack
 
-            const name = this.nameInput.getValue() || '';
+            const name = (this.nameInput.getValue() || '').trim();
             if (name.length) {
                 const character = this.characterNames[this.selectedCharacterIndex];
                 this.onCharacterSelected(name, character);

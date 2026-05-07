@@ -122,13 +122,15 @@ export class TextInput extends ClickableRectangle {
     private text: string;
     private isFocused: boolean;
     private placeholder: string;
+    private maxLength: number | null;
 
-    constructor(userInput: UserInput, placeholder: string = "") {
+    constructor(userInput: UserInput, placeholder: string = "", maxLength: number | null = null) {
         super(userInput, EMPTY_FUNCTION);
 
         this.text = "";
         this.isFocused = false;
         this.placeholder = placeholder;
+        this.maxLength = maxLength;
 
         document.addEventListener('keydown', (e) => {
             if (!this.isFocused) return;
@@ -136,7 +138,8 @@ export class TextInput extends ClickableRectangle {
             if (e.key === "Backspace") {
                 this.text = this.text.slice(0, -1);
             } else if (e.key.length === 1) {
-                this.text += e.key;
+                if (this.maxLength === null || this.text.length < this.maxLength)
+                    this.text += e.key;
             }
         });
     }
