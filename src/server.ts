@@ -34,6 +34,14 @@ if (process.env.OURSPACE_HTTPS_ENABLED) {
     console.log("Using https");
 }
 
+const MIME_TYPES: Record<string, string> = {
+    '.png': 'image/png',
+    '.jpg': 'image/jpeg',
+    '.jpeg': 'image/jpeg',
+    '.wav': 'audio/wav',
+    '.mp3': 'audio/mpeg',
+};
+
 // Serviamo i file del client, usando il server appena creato
 const indexHTMLFile = fs.readFileSync(path.join(PUBLIC_FOLDER, 'index.html'));
 const indexJSFile = fs.readFileSync(path.join(PUBLIC_FOLDER, 'index.js'));
@@ -45,6 +53,35 @@ httpServer.on('request', (req, res) => {
     else if (req.method === 'GET' && req.url === '/index.js') {
         res.writeHead(200, { 'Content-Type': 'application/javascript' });
         res.end(indexJSFile);
+    }
+    else if (req.method === 'GET' && req.url.startsWith('/assets/')) {
+        // Rimuoviamo eventuale query string dall'URL
+        const parsedUrl = new URL(req.url, `http://${req.headers.host}`);
+        
+        // Normalizziamo il percorso per impedire attachi "directory traversal"
+        // (esempio /assets/../../../../etc/passwd)
+        const sanitizePath = path.normalize(parsedUrl.pathname).replace(/^(\.\.[\/\\])+/, '');
+        
+        const filePath = path.join(process.cwd(), sanitizePath);
+
+        // Impostiamo Content-Type in base all'estensione del file
+        const extname = String(path.extname(filePath)).toLowerCase();
+        const contentType = MIME_TYPES[extname] || 'application/octet-stream';
+
+        fs.readFile(filePath, (error, content) => {
+            if (error) {
+                if (error.code === 'ENOENT') {
+                    res.writeHead(404, { 'Content-Type': 'text/plain' });
+                    res.end('404 - Asset Not Found', 'utf-8');
+                } else {
+                    res.writeHead(500, { 'Content-Type': 'text/plain' });
+                    res.end(`500 - Server Error: ${error.code}`, 'utf-8');
+                }
+            } else {
+                res.writeHead(200, { 'Content-Type': contentType });
+                res.end(content, 'binary');
+            }
+        });
     }
     else {
         res.writeHead(404, { 'Content-Type': 'text/plain' });

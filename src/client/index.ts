@@ -27,7 +27,7 @@ export const socket = new WebSocket(wsConnectionString);
 
 socket.addEventListener("message", async event => {
     const incomingMessage = JSON.parse(event.data);
-    lobby.handleMessage(incomingMessage);
+    await lobby.handleMessage(incomingMessage);
 });
 
 setInterval(() => {

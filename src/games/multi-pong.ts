@@ -1,12 +1,19 @@
-import { getCollisionSide, Player } from '../common';
+import { getCollisionSide } from '../common';
 import { IncomingMsg, OutgoingMsg } from '../server';
 import { GameClient, GameServer } from './game';
 
 const PLAYER_W = 0.04;
 const PLAYER_H = 0.15;
 const BALL_RADIUS = 0.03;
-
-const WINNING_SCORE = 5;
+const WINNING_SCORE = 100;
+const BORDERS = {
+    top: -1,
+    bottom: 1,
+    left: -2,
+    right: 2
+}
+const BORDERS_W = Math.abs(BORDERS.right - BORDERS.left);
+const BORDERS_H = Math.abs(BORDERS.top - BORDERS.bottom);
 
 export class PongServer extends GameServer {
 
@@ -22,36 +29,39 @@ export class PongServer extends GameServer {
         this.rightScore = 0;
 
         let i = 0;
+        const step = 0.08;
+        let leftX = BORDERS.left + step;
+        let rightX = BORDERS.right - step - PLAYER_W;
         Object.keys(players).forEach(id => {
             const player = players[id];
             if (i % 2 === 0) {
-                player.x = -0.97;
+                player.x = leftX;
                 player.y = 0;
+                leftX += step;
             }
             else {
-                player.x = 0.97 - PLAYER_W;
+                player.x = rightX;
                 player.y = 0;
+                rightX -= step;
             }
             i += 1;
         });
 
-        // TODO meccanismo che genera le palle
         setInterval(() => {
-            const randomSign = Math.random() > 0.5 ? 1 : -1;
+            const randomSignX = Math.random() > 0.5 ? 1 : -1;
+            const randomSignY = Math.random() > 0.5 ? 1 : -1;
             const ball = {
-                x:0, 
-                y:0, 
-                vx: randomSign * (0.1 + Math.random() )* 0.2,
-                vy: 0.1 + Math.random() * 0.2
+                x: 0,
+                y: 0,
+                vx: randomSignX * (0.1 + Math.random() * 0.35) * 2,
+                vy: randomSignY * (0.1 + Math.random() * 0.35)
             };
             this.balls.push(ball);
-        }, 1000);
+        }, 500);
     }
 
-    tick(
-        incomingMessages: IncomingMsg[],
-        dt: number
-    ): OutgoingMsg[] {
+    tick(incomingMessages: IncomingMsg[], dt: number): OutgoingMsg[] {
+        // aggiorniamo la posizione dei giocatori che si sono mossi
         incomingMessages.forEach(message => {
             const id = message.clientId;
             const payload = message.payload;
@@ -62,92 +72,86 @@ export class PongServer extends GameServer {
             }
         });
 
-        // TODO far muovere le palle
-        const ballsToRemove = [];
-        let i = 0;
-        this.balls.forEach(ball =>{
+        // iteriamo l'array di palle partendo dalla fine, cosi' possiamo
+        // eliminare quelle che escono dai bordi destro e sinisto
+        let collided = false;
+        for (let i = this.balls.length - 1; i >= 0; i--) {
+            const ball = this.balls[i]
             ball.x += ball.vx * dt;
             ball.y += ball.vy * dt;
 
-            if (ball.y + BALL_RADIUS > 1) {
+            // collisioni palla/bordo
+            if (ball.y + BALL_RADIUS > BORDERS.bottom) {
                 ball.vy *= -1;
-                ball.y = 1 - BALL_RADIUS;
+                ball.y = BORDERS.bottom - BALL_RADIUS;
             }
-            if (ball.y - BALL_RADIUS < -1) {
+            else if (ball.y - BALL_RADIUS < BORDERS.top) {
                 ball.vy *= -1;
-                ball.y = -1 + BALL_RADIUS;
+                ball.y = BORDERS.top + BALL_RADIUS;
             }
-            if (ball.x + BALL_RADIUS > 1) {
+            else if (ball.x + BALL_RADIUS > BORDERS.right) {
                 this.leftScore += 1;
-                ballsToRemove.push(i)
+                this.balls.splice(i, 1);
             }
-            if (ball.x - BALL_RADIUS < -1) {
+            else if (ball.x - BALL_RADIUS < BORDERS.left) {
                 this.rightScore += 1;
-                ballsToRemove.push(i)
+                this.balls.splice(i, 1);
             }
-            i += 1;
-            
-            Object.keys(this.players).forEach(id => {
-                const player = this.players[id];
-                const playerRect = { 
-                    x: player.x,
-                    y: player.y,
-                    w: PLAYER_W,
-                    h: PLAYER_H
-                };
 
-                const ballRect = { 
-                    x: ball.x - BALL_RADIUS,
-                    y: ball.y - BALL_RADIUS,
-                    w: BALL_RADIUS * 2,
-                    h: BALL_RADIUS * 2
-                };
-
-                const side = getCollisionSide(ballRect, playerRect);
-                if (side === "top"){
-                    ball.vy *= -1;
-                    ball.y = player.y - BALL_RADIUS;
-                } else if (side === "bottom"){
-                    ball.vy *= -1;
-                    ball.y = player.y + PLAYER_H    + BALL_RADIUS;
-                } else if (side === "left"){
-                    ball.vx *= -1;
-                    ball.x = player.x - BALL_RADIUS;
-                } 
-                else if (side === "right"){
-                    ball.vx *= -1;
-                    ball.x = player.x + PLAYER_W + BALL_RADIUS;
-                }
-            })
-        });
-
-        for( let i = ballsToRemove.length -1; i >= 0; i --){
-            this.balls.splice(ballsToRemove[i], 1);
-        }
-        // TODO gestire collisioni palla/bordi
-
-
-        // TODO gestire collisioni palla/giocatore
+            if (this.handleBallToPlayerCollisions(ball)) collided = true;
+        };
 
         return [{
             payload: {
                 players: this.players,
                 balls: this.balls,
                 leftScore: this.leftScore,
-                rightScore: this.rightScore
+                rightScore: this.rightScore,
+                ballPlayerCollision: collided
             }
-        }]
+        }];
     }
 
     isFinished(): boolean {
-        return this.leftScore == WINNING_SCORE || this.rightScore == WINNING_SCORE;
+        return this.leftScore  == WINNING_SCORE
+            || this.rightScore == WINNING_SCORE;
+    }
+
+    handleBallToPlayerCollisions(ball): boolean {
+        let collided = false;
+        Object.keys(this.players).forEach(id => {
+            const player = this.players[id];
+            const playerRect = { x: player.x, y: player.y, w: PLAYER_W, h: PLAYER_H };
+            const ballRect = { x: ball.x - BALL_RADIUS, y: ball.y - BALL_RADIUS, w: BALL_RADIUS * 2, h: BALL_RADIUS * 2 };
+
+            const side = getCollisionSide(ballRect, playerRect);
+            if (side === "top") {
+                ball.vy *= -1;
+                ball.y = player.y - BALL_RADIUS;
+            }
+            else if (side === "bottom") {
+                ball.vy *= -1;
+                ball.y = player.y + PLAYER_H + BALL_RADIUS;
+            }
+            else if (side === "left") {
+                ball.vx *= -1;
+                ball.x = player.x - BALL_RADIUS;
+            }
+            else if (side === "right") {
+                ball.vx *= -1;
+                ball.x = player.x + PLAYER_W + BALL_RADIUS;
+            }
+
+            collided ||= side !== "none";
+        });
+
+        return collided;
     }
 }
 
 import { UserInput } from '../client/user-input';
 
 export class PongClient extends GameClient {
-
     private players = null;
     private balls;
     private leftScore;
@@ -157,7 +161,12 @@ export class PongClient extends GameClient {
         super(userInput, myId);
     }
 
-    init(players) {
+    async init(players) {
+        players = players;
+        const folder = '/assets/multi-pong';
+        await this.assets.loadImage('ball', `${folder}/soccer-ball.png`);
+        this.assets.loadSound('bump', `${folder}/bump.mp3`);
+        return Promise.resolve();
     }
 
     draw(ctx: CanvasRenderingContext2D, dt: number) {
@@ -165,63 +174,82 @@ export class PongClient extends GameClient {
 
         const { screenW, screenH, moveDirectionY } = this.userInput;
 
-        // gestione movimento 
+        // +movimento
         const me = this.players[this.myId];
         me.y += moveDirectionY * dt * 1.3;
-        // TODO non far uscire il giocatore dallo schermo
-        
-        if (me.y < -1) me.y = -1;
-        else if (me.y + PLAYER_H > 1) me.y = 1 - PLAYER_H;
+
+        if (me.y < BORDERS.top) me.y = BORDERS.top;
+        else if (me.y + PLAYER_H > BORDERS.bottom) me.y = BORDERS.bottom - PLAYER_H;
+        // -movimento
+
+
+        ctx.fillStyle = "#000000";
+        ctx.fillRect(0, 0, screenW, screenH);
 
         ctx.save();
-        ctx.translate(screenW/2, screenH/2); // (0,0) al centro
-        ctx.scale(screenW/2, screenH/2); // coordinate normalizzate
+        const scaleX = screenW / BORDERS_W;
+        const scaleY = screenH / BORDERS_H;
+        const scale = Math.min(scaleX, scaleY);
+        ctx.translate(screenW / 2, screenH / 2); 
+        ctx.scale(scale, scale);
 
         ctx.fillStyle = "#00820d";
-        ctx.fillRect(-1, -1, 2, 2);
+        ctx.fillRect(BORDERS.left, BORDERS.top, BORDERS_W, BORDERS_H);
 
         ctx.fillStyle = "#e1e1e1";
         ctx.fillRect(0, -1, 0.05, 2);
 
         Object.keys(this.players).forEach(id => {
             const player = this.players[id];
-            ctx.fillStyle = "#1d1d1d";
+            ctx.fillStyle = id === this.myId ? "#ae0f00" : "#1d1d1d";
             ctx.fillRect(player.x, player.y, PLAYER_W, PLAYER_H);
         });
 
         this.balls.forEach(ball => {
-            ctx.fillStyle = "rgb(255, 0, 255)";
-            ctx.beginPath();
-            ctx.arc(ball.x, ball.y, BALL_RADIUS, 0, 2*Math.PI);
-            ctx.fill();
+            ctx.drawImage(
+                this.assets.images.ball, 
+                ball.x - BALL_RADIUS, // Shift left by radius
+                ball.y - BALL_RADIUS, // Shift up by radius
+                BALL_RADIUS * 2,      // Width is diameter
+                BALL_RADIUS * 2       // Height is diameter
+            );
         });
 
         ctx.restore();
 
         ctx.textAlign = "center";
         ctx.textBaseline = "top";
-        ctx.font = `$50px Arial`;
         ctx.lineWidth = 0.01;
+        ctx.font = `24px Arial`;
         ctx.fillStyle = "#eeeeee";
-        ctx.fillText(this.leftScore+'', 20,0);
-        ctx.fillText(this.rightScore+'', screenW - 20, 0);
-        
+        const marginLR = 60;
+        const marginTop = 20;
+        ctx.fillText(this.leftScore+'/'+WINNING_SCORE, marginLR, marginTop);
+        ctx.fillText(this.rightScore+'/'+WINNING_SCORE, screenW - marginLR, marginTop);
     }
 
     handleMessage(message: any) {
-        // TODO aggiornare solo la posizione degli altri giocatori
-        if (this.players === null) this.players = message.players;
-        else{
-            Object.keys(message.players).forEach(id =>{
+        if (this.players === null) {
+            this.players = message.players;
+        }
+        else { // aggiorno solo la posizione degli altri giocatori
+            Object.keys(message.players).forEach(id => {
                 const newPlayer = message.players[id];
-                if (id !== this.myId){
-                    this.players[id].y = newPlayer.y;
+                if (id !== this.myId) {
+                    this.players[id].y = newPlayer.y
                 }
             });
         }
         this.balls = message.balls;
         this.leftScore = message.leftScore;
         this.rightScore = message.rightScore;
+
+        if (message.ballPlayerCollision) {
+            const bumpSound = this.assets.sounds.bump;
+            bumpSound.volume = 0.5;
+            bumpSound.currentTime = 0;
+            bumpSound.play().catch(err => console.log("Waiting for user interaction to play audio"));
+        }
     }
 
     flushMessages(): any[] {
@@ -235,6 +263,8 @@ export class PongClient extends GameClient {
     }
 
     isFinished(): boolean {
-         return this.leftScore == WINNING_SCORE || this.rightScore == WINNING_SCORE;
+        // TODO aggiungere messaggio finale vinto/perso prima di uscire
+        return this.leftScore  == WINNING_SCORE
+            || this.rightScore == WINNING_SCORE;
     }
 }

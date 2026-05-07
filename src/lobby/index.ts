@@ -510,7 +510,7 @@ export class LobbyClient {
         this.gamesBtn.draw(ctx, screenW - 110, 10, 100, 30);
     }
 
-    handleMessage(message: LobbyServerMsg) {
+    async handleMessage(message: LobbyServerMsg) {
         if (message.kind === "gameStarted") {
             this.gameSelect.scratchGameProposal();
             this.gameSelect.hide();
@@ -521,7 +521,7 @@ export class LobbyClient {
             const gameInfo = GAMES[message.gameKey];
             if (!gameInfo) return;
             this.currentGame = new gameInfo.client(this.userInput, this.myId!);
-            this.currentGame.init(message.players);
+            await this.currentGame.init(message.players);
             this.currentGameId = message.gameId;
         }
         else if (message.kind === "gameProposal") {
@@ -632,8 +632,9 @@ export class LobbyClient {
 
 export function drawPersonName(ctx: CanvasRenderingContext2D, person: Person) {
     const fontSize = Math.floor(PERSON_H * 0.15);
-    const nameY = person.y - PERSON_H/2 - fontSize - PERSON_H*0.08;
     ctx.font = `${fontSize}px Arial`;
+
+    const nameY = person.y - PERSON_H/2 - fontSize - PERSON_H*0.08;
     const nameWidth = ctx.measureText(person.name).width;
     const padding = 4;
 
@@ -644,6 +645,7 @@ export function drawPersonName(ctx: CanvasRenderingContext2D, person: Person) {
         nameWidth + (padding * 2), 
         fontSize + (padding * 2)
     );
+
     ctx.textAlign = "center";
     ctx.textBaseline = "top";
     ctx.lineWidth = 4;
