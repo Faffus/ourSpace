@@ -14,12 +14,14 @@ const BORDERS_H = Math.abs(BORDERS.top - BORDERS.bottom);
 const SPAWN_INTERVAL = 0.5;
 const ZOMBIE_SPEED = 0.5;
 const PLAYER_SPEED = 1.3;
-const PLAYER_SIZE = 0.08;
-const ZOMBIE_SIZE = 0.08;
+const PLAYER_SIZE = 0.2;
+const ZOMBIE_SIZE = 0.2;
 const PROJECTILE_RADIUS = 0.02;
 const BOX_SIZE = 0.04;
 const BOX_INTERVAL = 10;
 const WAVE_DELAY = 5;
+
+
 
 
 export class shooterServer extends GameServer {
@@ -417,7 +419,22 @@ export class shooterClient extends GameClient {
   private highScore = 0;
   private pendingGameOver = false;
   private gameOverTimer = 0;
-  private gameOverDelay = 5; // seconds to show Game Over before signaling finish
+  private gameOverDelay = 5;
+
+  // -----------------------------
+  // ZOMBIE ANIMATION
+  // -----------------------------
+  private zombieAnimTimer = 0;
+  private ZOMBIE_FRAME_COUNT = 4;
+  private ZOMBIE_ANIM_SPEED = 8;
+
+  // -----------------------------
+  // PLAYER ANIMATION
+  // -----------------------------
+  private playerAnimTimer = 0;
+  private PLAYER_FRAME_COUNT = 4;
+  private PLAYER_ANIM_SPEED = 8;
+
   constructor(userInput: UserInput, myId: string) {
     super(userInput, myId);
 
@@ -439,7 +456,7 @@ export class shooterClient extends GameClient {
     });
   }
 
-  init(players) {
+  async init(players) {
     this.players = {};
     this.zombies = [];
     this.projectiles = [];
@@ -449,159 +466,362 @@ export class shooterClient extends GameClient {
       this.players[id] = { ...players[id], x: 0, y: 0 };
     });
 
+    const folder = '/assets/topShooter';
+
+    await this.assets.loadImage('zombie', `${folder}/zombie-walk.png`);
+    await this.assets.loadImage('player', `${folder}/Walk.png`);
+
     return Promise.resolve();
   }
-  
 
   draw(ctx: CanvasRenderingContext2D, dt: number) {
     if (this.players === null) return;
 
     const { screenW, screenH, moveDirectionY, moveDirectionX } = this.userInput;
 
-    // 1. Pulizia sfondo SEMPRE (altrimenti vedi i frame precedenti sotto il nero)
     ctx.fillStyle = "#000000";
     ctx.fillRect(0, 0, screenW, screenH);
 
-    // Nota: il Game Over è gestito per singolo giocatore più in basso,
-    // in modo che i giocatori morti vedano l'overlay mentre gli altri continuano.
-    // Movimento locale (Predictive) — solo se vivo
     const me = this.players[this.myId];
+
+    // -----------------------------
+    // MOVIMENTO LOCALE PLAYER
+    // -----------------------------
     if (me && me.life > 0) {
       me.x += moveDirectionX * dt * PLAYER_SPEED;
       me.y += moveDirectionY * dt * PLAYER_SPEED;
 
-      // Collisioni bordi
       me.x = Math.max(BORDERS.left, Math.min(BORDERS.right, me.x));
       me.y = Math.max(BORDERS.top, Math.min(BORDERS.bottom, me.y));
-      // assicurati che il gioco non mostri il Game Over se sei ancora vivo
+
       this.pendingGameOver = false;
       this.gameOverTimer = 0;
     }
 
-    // Pulizia sfondo
     ctx.fillStyle = "#000000";
     ctx.fillRect(0, 0, screenW, screenH);
 
     ctx.save();
+
     const scale = Math.min(screenW / BORDERS_W, screenH / BORDERS_H);
+
     ctx.translate(screenW / 2, screenH / 2);
     ctx.scale(scale, scale);
 
-    // Erba e campo
+    // -----------------------------
+    // MAPPA
+    // -----------------------------
     ctx.fillStyle = "#00820d";
     ctx.fillRect(BORDERS.left, BORDERS.top, BORDERS_W, BORDERS_H);
 
-    // Disegno giocatori
-    Object.keys(this.players).forEach(id => {
-      const player = this.players[id];
-      // Non disegnare giocatori morti
-      if (!player || player.life <= 0) return;
-      ctx.fillStyle = id === this.myId ? "#ae0f00" : "#1d1d1d";
-      ctx.fillRect(player.x - PLAYER_SIZE / 2, player.y - PLAYER_SIZE / 2, PLAYER_SIZE, PLAYER_SIZE);
-    });
+    // =========================================================
+    // PLAYER ANIMATI
+    // =========================================================
 
-    // Disegno zombie
-    this.zombies.forEach(zombie => {
-      ctx.fillStyle = "#112fd8c0";
-      ctx.fillRect(zombie.x - ZOMBIE_SIZE / 2, zombie.y - ZOMBIE_SIZE / 2, ZOMBIE_SIZE, ZOMBIE_SIZE);
-    });
+    this.playerAnimTimer += dt;
 
-    // Disegno proiettili
+    const playerFrame =
+      Math.floor(this.playerAnimTimer * this.PLAYER_ANIM_SPEED)
+      % this.PLAYER_FRAME_COUNT;
+
+    const playerSprite = this.assets.images['player'];
+
+    if (playerSprite) {
+
+      const sw = 30;
+      const sh = 32;
+
+      Object.keys(this.players).forEach(id => {
+
+        const player = this.players[id];
+
+        if (!player || player.life <= 0) return;
+
+        ctx.save();
+
+        ctx.translate(player.x, player.y);
+
+        // -----------------------------
+        // DIREZIONE
+        // -----------------------------
+        let directionRow = 0;
+
+        if (id === this.myId) {
+
+          if (moveDirectionY > 0) {
+            directionRow = 0; // FRONT
+          }
+          else if (moveDirectionY < 0) {
+            directionRow = 1; // BACK
+          }
+          else if (moveDirectionX > 0) {
+            directionRow = 2; // RIGHT
+          }
+          else if (moveDirectionX < 0) {
+            directionRow = 3; // LEFT
+          }
+        }
+
+        // -----------------------------
+        // IDLE / WALK
+        // -----------------------------
+        const isMoving =
+          moveDirectionX !== 0 || moveDirectionY !== 0;
+
+        const currentFrame = isMoving ? playerFrame : 0;
+
+        ctx.drawImage(
+          playerSprite,
+
+          currentFrame * sw,
+          directionRow * sh,
+
+          sw,
+          sh,
+
+          -PLAYER_SIZE / 2,
+          -PLAYER_SIZE / 2,
+
+          PLAYER_SIZE,
+          PLAYER_SIZE
+        );
+
+        ctx.restore();
+      });
+    }
+
+    // =========================================================
+    // ZOMBIE ANIMATI
+    // =========================================================
+
+    this.zombieAnimTimer += dt;
+
+    const zombieFrame =
+      Math.floor(this.zombieAnimTimer * this.ZOMBIE_ANIM_SPEED)
+      % this.ZOMBIE_FRAME_COUNT;
+
+    const zombieSprite = this.assets.images['zombie'];
+
+    if (zombieSprite) {
+
+      const sw = zombieSprite.width / this.ZOMBIE_FRAME_COUNT;
+      const sh = zombieSprite.height;
+
+      this.zombies.forEach(zombie => {
+
+        ctx.save();
+
+        ctx.translate(zombie.x, zombie.y);
+
+        ctx.drawImage(
+          zombieSprite,
+
+          zombieFrame * sw,
+          0,
+
+          sw,
+          sh,
+
+          -ZOMBIE_SIZE / 2,
+          -ZOMBIE_SIZE / 2,
+
+          ZOMBIE_SIZE,
+          ZOMBIE_SIZE
+        );
+
+        ctx.restore();
+      });
+
+    } else {
+
+      this.zombies.forEach(zombie => {
+        ctx.fillStyle = "#112fd8c0";
+
+        ctx.fillRect(
+          zombie.x - ZOMBIE_SIZE / 2,
+          zombie.y - ZOMBIE_SIZE / 2,
+          ZOMBIE_SIZE,
+          ZOMBIE_SIZE
+        );
+      });
+    }
+
+    // =========================================================
+    // PROIETTILI
+    // =========================================================
+
     if (this.projectiles) {
+
       this.projectiles.forEach(projectile => {
+
         ctx.fillStyle = "rgba(248, 232, 5, 0.99)";
+
         ctx.beginPath();
-        ctx.arc(projectile.x, projectile.y, PROJECTILE_RADIUS, 0, Math.PI * 2);
+
+        ctx.arc(
+          projectile.x,
+          projectile.y,
+          PROJECTILE_RADIUS,
+          0,
+          Math.PI * 2
+        );
+
         ctx.fill();
       });
     }
 
-    // Disegno scatole
+    // =========================================================
+    // SCATOLE
+    // =========================================================
+
     this.boxes.forEach(boxe => {
+
       ctx.fillStyle = "rgba(163, 98, 0, 0.82)";
-      ctx.fillRect(boxe.x - BOX_SIZE / 2, boxe.y - BOX_SIZE / 2, BOX_SIZE, BOX_SIZE);
+
+      ctx.fillRect(
+        boxe.x - BOX_SIZE / 2,
+        boxe.y - BOX_SIZE / 2,
+        BOX_SIZE,
+        BOX_SIZE
+      );
     });
 
-    
     ctx.restore();
 
-   // --- DISEGNO UI ONDATE ---
-  ctx.fillStyle = "#ffffff";
-  ctx.font = "bold 24px Arial";
-  ctx.textAlign = "center";
+    // =========================================================
+    // UI
+    // =========================================================
 
-  // Mostriamo il numero dell'ondata in alto al centro
-  ctx.fillText(`ONDATA ${this.currentWave}`, screenW / 2, 30);
-
-  // Mostriamo il timer e lo stato
-  if (this.isPaused) {
-    ctx.fillStyle = "#ffcc00"; // Colore arancione/giallo per la pausa
-    ctx.font = "20px Arial";
-    ctx.fillText(`PROSSIMA ONDATA IN: ${this.waveTimer}s`, screenW / 2, 60);
-    
-    // Testo centrale opzionale per avvisare il giocatore
-    ctx.font = "bold 40px Arial";
-    ctx.fillText("PREPARATI!", screenW / 2, screenH / 2 - 50);
-  } else {
     ctx.fillStyle = "#ffffff";
-    ctx.font = "18px Arial";
-    ctx.fillText(`TEMPO RIMASTO: ${this.waveTimer}s`, screenW / 2, 60);
-  }
+    ctx.font = "bold 24px Arial";
+    ctx.textAlign = "center";
 
-  
+    ctx.fillText(`ONDATA ${this.currentWave}`, screenW / 2, 30);
 
-  // --- SCORE (Il tuo codice esistente) ---
-  const myScore = this.players[this.myId].score;
-  ctx.textAlign = "right";
-  ctx.fillStyle = "#eeeeee";
-  ctx.fillText(`SCORE: ${myScore}`, screenW - 20, 30);
+    if (this.isPaused) {
 
-  // Se il giocatore locale è morto, mostriamo l'overlay Game Over (senza fermare il server)
-  if (me && me.life <= 0) {
-    if (!this.pendingGameOver) {
-      this.pendingGameOver = true;
-      this.gameOverTimer = 0;
+      ctx.fillStyle = "#ffcc00";
+      ctx.font = "20px Arial";
+
+      ctx.fillText(
+        `PROSSIMA ONDATA IN: ${this.waveTimer}s`,
+        screenW / 2,
+        60
+      );
+
+      ctx.font = "bold 40px Arial";
+
+      ctx.fillText(
+        "PREPARATI!",
+        screenW / 2,
+        screenH / 2 - 50
+      );
+
+    } else {
+
+      ctx.fillStyle = "#ffffff";
+      ctx.font = "18px Arial";
+
+      ctx.fillText(
+        `TEMPO RIMASTO: ${this.waveTimer}s`,
+        screenW / 2,
+        60
+      );
     }
 
-    this.gameOverTimer += dt;
+    // =========================================================
+    // SCORE
+    // =========================================================
 
-    ctx.save();
-    ctx.fillStyle = "rgba(0, 0, 0, 0.7)";
-    ctx.fillRect(0, 0, screenW, screenH);
+    const myScore = this.players[this.myId].score;
 
-    ctx.fillStyle = "#ff0000";
-    ctx.font = "bold 72px Arial";
-    ctx.textAlign = "center";
-    ctx.textBaseline = "middle";
-    ctx.fillText("GAME OVER", screenW / 2, screenH / 2 - 40);
+    ctx.textAlign = "right";
+    ctx.fillStyle = "#eeeeee";
 
-    ctx.fillStyle = "#ffffff";
-    ctx.font = "32px Arial";
-    ctx.fillText(`HIGHSCORE DI SQUADRA: ${this.highScore}`, screenW / 2, screenH / 2 + 50);
-    
-    ctx.font = "20px Arial";
-    ctx.fillText(`Il tuo score: ${me.score || 0}`, screenW / 2, screenH / 2 + 90);
+    ctx.fillText(
+      `SCORE: ${myScore}`,
+      screenW - 20,
+      30
+    );
 
-    ctx.font = "16px Arial";
-    const remaining = Math.max(0, Math.ceil(this.gameOverDelay - this.gameOverTimer));
-    ctx.fillText(`Torna alla lobby in: ${remaining}s`, screenW / 2, screenH / 2 + 130);
+    // =========================================================
+    // GAME OVER
+    // =========================================================
 
-    ctx.restore();
-  }
+    if (me && me.life <= 0) {
+
+      if (!this.pendingGameOver) {
+        this.pendingGameOver = true;
+        this.gameOverTimer = 0;
+      }
+
+      this.gameOverTimer += dt;
+
+      ctx.save();
+
+      ctx.fillStyle = "rgba(0, 0, 0, 0.7)";
+      ctx.fillRect(0, 0, screenW, screenH);
+
+      ctx.fillStyle = "#ff0000";
+      ctx.font = "bold 72px Arial";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+
+      ctx.fillText(
+        "GAME OVER",
+        screenW / 2,
+        screenH / 2 - 40
+      );
+
+      ctx.fillStyle = "#ffffff";
+      ctx.font = "32px Arial";
+
+      ctx.fillText(
+        `HIGHSCORE DI SQUADRA: ${this.highScore}`,
+        screenW / 2,
+        screenH / 2 + 50
+      );
+
+      ctx.font = "20px Arial";
+
+      ctx.fillText(
+        `Il tuo score: ${me.score || 0}`,
+        screenW / 2,
+        screenH / 2 + 90
+      );
+
+      ctx.font = "16px Arial";
+
+      const remaining =
+        Math.max(
+          0,
+          Math.ceil(this.gameOverDelay - this.gameOverTimer)
+        );
+
+      ctx.fillText(
+        `Torna alla lobby in: ${remaining}s`,
+        screenW / 2,
+        screenH / 2 + 130
+      );
+
+      ctx.restore();
+    }
   }
 
   handleMessage(message: any) {
+
     if (!this.players) {
-      // Prima volta: copiamo lo stato completo dei player
+
       this.players = {};
+
       Object.keys(message.players).forEach(id => {
         this.players[id] = { ...message.players[id] };
       });
+
     } else {
-      // Aggiorniamo lo stato ricevuto dal server.
-      // Manteniamo la posizione locale del giocatore corrente (prediction),
-      // ma sincronizziamo il resto (score, life, ecc.) per mostrare Game Over.
+
       Object.keys(message.players).forEach(id => {
+
         if (!this.players[id]) {
           this.players[id] = { ...message.players[id] };
           return;
@@ -612,11 +832,9 @@ export class shooterClient extends GameClient {
           this.players[id].y = message.players[id].y;
         }
 
-        // Manteniamo sempre score e vita aggiornati dal server
         this.players[id].score = message.players[id].score;
         this.players[id].life = message.players[id].life;
 
-        // Sincronizziamo anche eventuali altri campi utili
         if (message.players[id].weaponMode !== undefined) {
           this.players[id].weaponMode = message.players[id].weaponMode;
         }
@@ -626,23 +844,20 @@ export class shooterClient extends GameClient {
     this.zombies = message.zombies;
     this.projectiles = message.projectiles;
     this.boxes = message.boxes;
+
     this.highScore = message.highScore;
 
-    // Salviamo i dati dell'ondata
     this.currentWave = message.wave;
     this.waveTimer = message.timer;
     this.isPaused = message.isPaused;
-
-    this.zombies = message.zombies;
-    this.projectiles = message.projectiles;
-    this.boxes = message.boxes;
   }
 
   flushMessages(): any[] {
+
     if (this.players === null) return [];
 
     const me = this.players[this.myId];
-    // Se siamo morti, non inviamo più input di gioco al server
+
     if (!me || me.life <= 0) return [];
 
     return [{
@@ -656,9 +871,12 @@ export class shooterClient extends GameClient {
   }
 
   isFinished(): boolean {
+
     if (!this.players) return false;
-    // Il gioco verrà considerato finito SOLO dopo che il client avrà
-    // mostrato la schermata di Game Over per il tempo configurato.
-    return this.pendingGameOver && this.gameOverTimer >= this.gameOverDelay;
+
+    return (
+      this.pendingGameOver &&
+      this.gameOverTimer >= this.gameOverDelay
+    );
   }
 }
