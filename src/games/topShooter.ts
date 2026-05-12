@@ -128,6 +128,17 @@ export class shooterServer extends GameServer {
    */
   private pendingSpawns;
 
+  private mines;
+  private pendingMines;
+
+  private spawnMine() {
+    this.pendingMines.push({
+          x: (Math.random() - 0.5) * BORDERS_W,
+          y: (Math.random() - 0.5) * BORDERS_H,
+          timer: 0,
+          delay: 0.5
+        });
+  }
   /**
    * Inizializza il server con la lista dei player.
    * Viene chiamata una sola volta all'avvio della partita.
@@ -153,6 +164,10 @@ export class shooterServer extends GameServer {
     this.boxCounter = 0;
     this.boxes = [];
     this.pendingSpawns = [];
+
+    this.mines = [];
+    this.pendingMines = [];
+
 
     // Posizione iniziale e statistiche per ogni player
     Object.keys(players).forEach(id => {
@@ -227,6 +242,8 @@ export class shooterServer extends GameServer {
         this.delayTimer = 0;
         this.zombies = [];
         this.pendingSpawns = [];
+        this.mines = [];
+        this.pendingMines = [];
         console.log("Ondata terminata! Pausa di 5 secondi...");
       }
     } else {
@@ -237,6 +254,12 @@ export class shooterServer extends GameServer {
         this.waveCounter += 1;
         this.waveDuration += 5;   // ogni ondata dura 5 secondi in più
         this.orde += 2;           // ogni ondata aggiunge 2 zombie al massimo
+        if (this.waveCounter >= 2 && this.mines.length === 0 && this.pendingMines.length === 0) {
+          // Spawna le mine solo se non ce ne sono già (persistono tra ondate)
+          for (let i = 0; i < 4; i++) {
+            this.spawnMine();
+          }
+        }
         console.log(`Inizia Ondata ${this.waveCounter}!`);
       }
     }
@@ -274,6 +297,58 @@ export class shooterServer extends GameServer {
       }
     }
 
+    
+
+    for (let i = this.pendingMines.length - 1; i >= 0; i--) {
+      const pm = this.pendingMines[i];
+      pm.timer += dt;
+      if (pm.timer >= pm.delay) {
+        this.mines.push({
+          x: pm.x,
+          y: pm.y,
+          timer: 0,        // timer per il riposizionamento
+          lifespan: 3    // secondi prima di spostarsi
+        });
+        this.pendingMines.splice(i, 1);
+      }
+    }
+
+    for (let i = this.mines.length - 1; i >= 0; i--) {
+      const mine = this.mines[i];
+      mine.timer += dt;
+      if (mine.timer >= mine.lifespan) {
+        this.mines.splice(i, 1);
+        this.spawnMine(); // riparte come pending nella nuova posizione
+      }
+    }
+
+    Object.keys(this.players).forEach(id => {
+      const player = this.players[id];
+      if (player.life <= 0) return;
+
+      const playerRect = {
+        x: player.x - PLAYER_SIZE / 2,
+        y: player.y - PLAYER_SIZE / 2,
+        w: PLAYER_SIZE,
+        h: PLAYER_SIZE
+      };
+
+      for (let j = this.mines.length - 1; j >= 0; j--) {
+        const mine = this.mines[j];
+        const mineRect = {
+          x: mine.x - BOX_SIZE / 2,
+          y: mine.y - BOX_SIZE / 2,
+          w: BOX_SIZE,
+          h: BOX_SIZE
+        };
+
+        if (getCollisionSide(playerRect, mineRect) !== 'none') {
+          player.life -= 1;
+          this.mines.splice(j, 1);
+          this.spawnMine(); // la mina esplosa si riposiziona subito altrove
+        }
+      }
+    });
     // ----------------------------------------------------------
     // 5. GESTIONE SPARO E PROIETTILI
     // ----------------------------------------------------------
@@ -562,7 +637,14 @@ export class shooterServer extends GameServer {
         timer: this.isWaveActive
           ? Math.ceil(this.waveDuration - this.currentWaveTimer)
           : Math.ceil(WAVE_DELAY - this.delayTimer),
-        highScore: Math.max(...Object.values(this.players).map((p: any) => p.score), 0)
+        highScore: Math.max(...Object.values(this.players).map((p: any) => p.score), 0),
+        mines: this.mines,
+        pendingMines: this.pendingMines.map((pm: any) => ({
+          x: pm.x,
+          y: pm.y,
+          remaining: Math.max(0, pm.delay - pm.timer),
+          delay: pm.delay
+        })),
       }
     }];
   }
@@ -644,6 +726,8 @@ export class shooterClient extends GameClient {
   /** Frame al secondo dell'animazione player. */
   private PLAYER_ANIM_SPEED = 8;
 
+  private mines = [];
+  private pendingMines = [];
   /**
    * Costruttore: registra i listener per mouse e touch.
    * @param userInput - Oggetto che espone input da tastiera e gamepad.
@@ -884,6 +968,44 @@ export class shooterClient extends GameClient {
       );
     });
 
+    // Mine in attesa (cerchio grigio semitrasparente, stessa logica dei pending spawn)
+    this.pendingMines.forEach((pm: any) => {
+      const remaining = pm.remaining ?? pm.delay ?? 0.5;
+      const frac = Math.max(0, Math.min(1, remaining / (pm.delay || 0.5)));
+
+      ctx.beginPath();
+      ctx.strokeStyle = `rgba(150,150,150,${frac * 0.9})`;
+      ctx.lineWidth = 0.01;
+      ctx.arc(pm.x, pm.y, BOX_SIZE / 2, 0, Math.PI * 2);
+      ctx.stroke();
+
+      ctx.fillStyle = `rgba(150,150,150,${frac * 0.15})`;
+      ctx.fill();
+    });
+
+    // Mine attive
+    this.mines.forEach((mine: any) => {
+      // Lampeggia negli ultimi 0.5 secondi prima di spostarsi
+      const isAboutToMove = mine.lifespan - mine.timer < 0.5;
+      ctx.fillStyle = isAboutToMove
+        ? `rgba(255, 80, 0, ${0.5 + 0.5 * Math.sin(Date.now() / 80)})` // arancione lampeggiante
+        : "#8B0000"; // rosso scuro fisso
+
+      ctx.beginPath();
+      ctx.arc(mine.x, mine.y, BOX_SIZE / 2, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Croce sopra per renderla riconoscibile come mina
+      ctx.strokeStyle = "#ffffff";
+      ctx.lineWidth = 0.005;
+      ctx.beginPath();
+      ctx.moveTo(mine.x - BOX_SIZE / 3, mine.y);
+      ctx.lineTo(mine.x + BOX_SIZE / 3, mine.y);
+      ctx.moveTo(mine.x, mine.y - BOX_SIZE / 3);
+      ctx.lineTo(mine.x, mine.y + BOX_SIZE / 3);
+      ctx.stroke();
+    });
+
     ctx.restore(); // ripristina il sistema di coordinate originale
 
     // ==========================================================
@@ -1016,6 +1138,9 @@ export class shooterClient extends GameClient {
     this.currentWave = message.wave;
     this.waveTimer = message.timer;
     this.isPaused = message.isPaused;
+
+    this.mines = message.mines;
+    this.pendingMines = message.pendingMines;
   }
 
   /**
