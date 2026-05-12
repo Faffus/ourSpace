@@ -22,10 +22,10 @@ import { GameClient, GameServer } from './game';
 
 /** Bordi del campo di gioco (coordinate mondo). */
 const BORDERS = {
-  top: -1,
-  bottom: 1,
-  left: -2,
-  right: 2
+  top: -2,
+  bottom: 2,
+  left: -3,
+  right: 3
 }
 
 /** Larghezza del campo di gioco in unità mondo. */
@@ -207,8 +207,8 @@ export class shooterServer extends GameServer {
     this.boxTimer += dt;
     if (this.boxCounter < 2 && this.boxTimer >= BOX_INTERVAL) {
       this.boxTimer = 0;
-      const randomX = (Math.random() - 0.5) * 2;
-      const randomY = (Math.random() - 0.5) * 2;
+      const randomX = (Math.random() - 0.5) * 4;
+      const randomY = (Math.random() - 0.5) * 4;
       this.boxes.push({ x: randomX, y: randomY });
       this.boxCounter += 1;
       console.log("scatole: " + this.boxCounter);
@@ -256,8 +256,8 @@ export class shooterServer extends GameServer {
       const groupCount = Math.min(desiredGroup, availableSlots);
       if (groupCount > 0) {
         for (let i = 0; i < groupCount; i++) {
-          const randomX = (Math.random() - 0.5) * 4;
-          const randomY = (Math.random() - 0.5) * 4;
+          const randomX = (Math.random() - 0.5) * 5;
+          const randomY = (Math.random() - 0.5) * 5;
           this.pendingSpawns.push({ x: randomX, y: randomY, timer: 0, delay: 0.5 });
         }
       }
