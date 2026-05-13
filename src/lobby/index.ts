@@ -406,7 +406,7 @@ type ClientPerson = Person & {
 };
 
 const buildings: Arcade[] = [
-    new Arcade({ x: 200, y: -100, w: 1200, h: 600 }, 50),
+    new Arcade({ x: 200, y: -1000, w: 1200, h: 800 }, 50),
 ];
 
 export class LobbyClient {

@@ -128,10 +128,10 @@ export class Arcade {
         const smallLetterY = letterY + letterH - smallLetterH;
         // r
         letterX += letterW + spacing;
-        const rExtraH = smallLetterY * 0.07;
+        const rExtraH = letterH * 0.07;
         ctx.fillRect(letterX, smallLetterY - rExtraH, thickness, smallLetterH + rExtraH);
         ctx.fillRect(letterX, smallLetterY, letterW, thickness);
-        ctx.fillRect(letterX + letterW - thickness, smallLetterY, thickness, smallLetterY * 0.1);
+        ctx.fillRect(letterX + letterW - thickness, smallLetterY, thickness, thickness + rExtraH);
 
         // c
         letterX += letterW + spacing;
@@ -184,11 +184,21 @@ export class Arcade {
             ctx.fillRect(box.x, box.y, box.w, box.h);
         }
 
+        // +frontWall
         ctx.globalAlpha = this.frontAlpha;
         ctx.fillStyle = this.wallColor;
-        ctx.fillRect(r.x, r.y, r.w, r.h - this.doorHeight);
-        ctx.fillRect(r.x, r.y, r.w/2 - this.doorWidth/2, r.h);
-        ctx.fillRect(r.x + r.w/2 + this.doorWidth/2, r.y, r.w/2 - this.doorWidth/2, r.h);
+        ctx.beginPath();
+        ctx.moveTo(r.x, r.y);
+        ctx.lineTo(r.x + r.w, r.y);
+        ctx.lineTo(r.x + r.w, r.y + r.h);
+        ctx.lineTo(doorRight, r.y + r.h);
+        ctx.lineTo(doorRight, r.y + r.h - this.doorHeight);
+        ctx.lineTo(doorLeft, r.y + r.h - this.doorHeight);
+        ctx.lineTo(doorLeft, r.y + r.h);
+        ctx.lineTo(r.x, r.y + r.h);
+        ctx.closePath();
+        ctx.fill();
+        // -frontWall
         
         this.drawSign(ctx);
 
@@ -210,7 +220,7 @@ export class Arcade {
 
         // +roof
         const roofH = this.wallThickness;
-        const roofExtra = roofH * 0.5;
+        const roofExtraW = roofH * 0.6;
         const roofBottom = r.y + r.h - this.tallness; 
         const roofTop = roofBottom - roofH;
 
@@ -218,8 +228,8 @@ export class Arcade {
         ctx.fillRect(r.x, r.y - this.tallness - roofH, r.w, r.h);
 
         ctx.beginPath();
-        ctx.moveTo(r.x - roofExtra, roofBottom);
-        ctx.lineTo(r.x + r.w + roofExtra, roofBottom);
+        ctx.moveTo(r.x - roofExtraW, roofBottom);
+        ctx.lineTo(r.x + r.w + roofExtraW, roofBottom);
         ctx.lineTo(r.x + r.w, roofTop);
         ctx.lineTo(r.x, roofTop);
         ctx.closePath();
@@ -227,19 +237,19 @@ export class Arcade {
         ctx.fill();
 
         ctx.beginPath();
-        ctx.moveTo(r.x - roofExtra, roofBottom);
+        ctx.moveTo(r.x - roofExtraW, roofBottom);
         ctx.lineTo(r.x, roofTop);
         ctx.lineTo(r.x, roofTop - r.h);
-        ctx.lineTo(r.x - roofExtra, roofBottom - r.h);
+        ctx.lineTo(r.x - roofExtraW, roofBottom - r.h);
         ctx.closePath();
         ctx.fillStyle = this.roofColorDark;
         ctx.fill();
 
         ctx.beginPath();
-        ctx.moveTo(r.x + r.w + roofExtra, roofBottom);
+        ctx.moveTo(r.x + r.w + roofExtraW, roofBottom);
         ctx.lineTo(r.x + r.w, roofTop);
         ctx.lineTo(r.x + r.w, roofTop - r.h);
-        ctx.lineTo(r.x + r.w + roofExtra, roofTop - r.h + roofH);
+        ctx.lineTo(r.x + r.w + roofExtraW, roofTop - r.h + roofH);
         ctx.closePath();
         ctx.fillStyle = this.roofColorDark;
         ctx.fill();
