@@ -3,53 +3,56 @@ import { IncomingMsg, OutgoingMsg } from '../server';
 import { UserInput } from '../client/user-input';
 
 // ==========================================
-// 1. COSTANTI E MAPPA DI GIOCO
+// 1. COSTANTI
 // ==========================================
 
-// Dimensioni virtuali del canvas di gioco (coordinate server-side)
 const VIRTUAL_W = 1000;
 const VIRTUAL_H = 600;
 
-// Fisica di base
-const GRAVITY      = 1500; // px/s² - accelerazione verso il basso
-const JUMP_FORCE   = 600;  // px/s  - velocità verticale applicata al salto
-const MOVE_SPEED   = 360;  // px/s  - velocità massima orizzontale a terra
+// Fisica
+const GRAVITY        = 1400;
+const JUMP_FORCE     = 620;
+const MOVE_SPEED     = 360;
+const MAX_FALL_SPEED = 1200;
+const FRICTION_GROUND = 22;
+const FRICTION_AIR    = 5;
+const AIR_ACCEL       = 900;
 
-// Frizione: quanto velocemente il personaggio rallenta (moltiplicatore per dt)
-// A terra la frizione è alta (stop quasi istantaneo), in aria è bassa (scivoloso)
-const FRICTION_GROUND = 25;  // moltiplicatore per dt -> quasi istantaneo
-const FRICTION_AIR    = 6;   // moltiplicatore per dt -> lento, da smash bros
-
-// Limiti dell'arena: uscire da questi bordi causa la morte
-const MAP_LIMIT_LEFT   = -120;
-const MAP_LIMIT_RIGHT  = 1120;
+// Limiti arena
+const MAP_LIMIT_LEFT   = -150;
+const MAP_LIMIT_RIGHT  = 1150;
 const MAP_LIMIT_TOP    = -500;
-const MAP_LIMIT_BOTTOM = 750;
+const MAP_LIMIT_BOTTOM = 800;
 
-// Combattimento
-const DAMAGE_PER_HIT    = 10;   // danno base per colpo
-const BASE_KNOCKBACK_X  = 380;  // sbalzo orizzontale base (px/s)
-// Lo sbalzo verticale è calcolato come frazione di quello orizzontale finale.
-// Così un colpo forte manda lontano in orizzontale E un po' in su,
-// ma non vola prevalentemente verso l'alto come un razzo.
-// Valore: 0 = nessuno sbalzo verticale, 1 = uguale all'orizzontale
-const KNOCKBACK_Y_RATIO = 0.80; // componente verticale = 55% di quella orizzontale
-const KNOCKBACK_SCALING = 45;   // più è alto, più il danno influenza lo sbalzo
-const KNOCKBACK_CAP     = 10.0;  // cap del moltiplicatore: evita voli all'infinito
+// Combattimento base
+const DAMAGE_PER_HIT   = 10;
+const BASE_KNOCKBACK_X = 440;
+const BASE_KNOCKBACK_Y = 180;
+const KNOCKBACK_SCALE  = 50;
+const KNOCKBACK_CAP    = 100.0;
+const HITSTUN_DURATION = 0.18;
 
-// Vite per giocatore - quando scendono a zero la partita finisce
-const MAX_LIVES = 3;
+// Hitbox attacco base (senza powerup)
+const ATTACK_W_BASE   = 48;
+const ATTACK_H        = 26;
+const ATTACK_Y_OFFSET = 6;
 
-// Tempo di respawn dopo la morte (in secondi)
-const RESPAWN_TIME = 2.0;
-
-// Durata del messaggio di kill sullo schermo (in secondi)
+// Vite e rispawn
+const MAX_LIVES         = 3;
+const RESPAWN_TIME      = 2.0;
 const KILL_MSG_DURATION = 2.5;
 
-// Hitbox dell'attacco, relativa al bordo del personaggio
-const ATTACK_W = 45;
-const ATTACK_H = 24;
-const ATTACK_Y_OFFSET = 8; // quanto scende dalla cima del personaggio
+// Power up
+const POWERUP_SPAWN_INTERVAL = 8.0;   // secondi tra uno spawn e il successivo
+const POWERUP_MAX_ON_MAP     = 2;     // massimo simultanei sulla mappa
+const POWERUP_DURATION       = 20.0;  // durata del powerup sul player (secondi)
+const POWERUP_RADIUS         = 16;    // raggio hitbox raccolta
+
+// Effetti dei singoli powerup
+const PU_ATTACK_BONUS_W  = 40;   // px extra di portata attacco
+const PU_HEAL_AMOUNT     = 25;   // % di danno curato
+const PU_FORCE_DMG_BONUS = 5;    // danno extra per colpo con powerup forza
+const PU_FORCE_KB_BONUS  = 80;   // px/s extra di knockback con powerup forza
 
 // ==========================================
 // INTERFACCE
@@ -60,82 +63,119 @@ interface Platform {
     y: number;
     w: number;
     h: number;
-    isSolid: boolean; // true = blocca anche dal basso (piattaforma solida)
+    isSolid: boolean;
+    speed?: number; // piattaforma mobile: velocita px/s
+    xMin?:  number;
+    xMax?:  number;
+    dir?:   number; // 1 = destra, -1 = sinistra
 }
 
-// Stato completo di un giocatore (server-side)
+// Tipi di powerup disponibili
+type PowerUpType = "attack" | "heal" | "force";
+
+interface PowerUp {
+    id:     number;        // id univoco per tracking
+    x:      number;
+    y:      number;
+    type:   PowerUpType;
+    active: boolean;       // false = gia raccolto, da rimuovere
+}
+
 interface PlayerState {
-    // Posizione e dimensioni
     x: number;
     y: number;
     w: number;
     h: number;
 
-    // Velocità
     vx: number;
     vy: number;
 
-    // Estetica
     color: string;
 
-    // Direzione e stato movimento
-    facingRight:       boolean;
-    isOnGround:        boolean; // true se il piede tocca una piattaforma
-    jumpsLeft:         number;  // salti rimanenti (2 = terra, 1 = in aria, 0 = esauriti)
-    jumpKeyWasPressed: boolean;
+    facingRight:        boolean;
+    isOnGround:         boolean;
+    jumpsLeft:          number;
+    jumpKeyWasPressed:  boolean;
 
-    // Stato attacco
     isAttacking: boolean;
-    hasHit:      boolean;    // true se l'attacco corrente ha già colpito
+    hasHit:      boolean;
+    hitstun:     number;
 
-    // Combattimento e vite
-    damage:          number;  // percentuale accumulata (come smash bros)
-    lives:           number;  // vite rimanenti
-    isDead:          boolean; // true = morto in questo momento (in respawn)
-    respawnTimer:    number;  // secondi rimasti prima del respawn
+    damage:       number;
+    lives:        number;
+    isDead:       boolean;
+    respawnTimer: number;
+    spawnIndex:   number;
 
-    // Indice del giocatore (0 o 1) per posizionamento spawn
-    spawnIndex: number;
+    // Powerup attivo sul player
+    activePowerUp:      PowerUpType | null; // tipo attivo, null se nessuno
+    powerUpTimer:       number;             // secondi rimasti
 }
 
-// Layout delle piattaforme
+// ==========================================
+// MAPPA
+// ==========================================
+
 const PLATFORMS: Platform[] = [
-    // Pavimento principale, solido su tutti i lati
-    { x: 150, y: 450, w: 700, h: 40, isSolid: true },
-    // Piattaforme galleggianti (passabili dal basso)
-    { x: 200, y: 300, w: 150, h: 15, isSolid: false },
-    { x: 650, y: 300, w: 150, h: 15, isSolid: false },
-    { x: 425, y: 180, w: 150, h: 15, isSolid: false }
+    // Pavimento principale (solido)
+    { x: 100, y: 450, w: 800, h: 35, isSolid: true },
+
+    // Piattaforme laterali basse
+    { x: 60,  y: 340, w: 120, h: 15, isSolid: false },
+    { x: 820, y: 340, w: 120, h: 15, isSolid: false },
+
+    // Piattaforme medie
+    { x: 210, y: 290, w: 140, h: 15, isSolid: false },
+    { x: 650, y: 290, w: 140, h: 15, isSolid: false },
+
+    // Piattaforma alta centrale
+    { x: 420, y: 170, w: 160, h: 15, isSolid: false },
+
+    // Piattaforme laterali alte
+    { x: 120, y: 200, w: 110, h: 15, isSolid: false },
+    { x: 770, y: 200, w: 110, h: 15, isSolid: false },
+
+    // Piattaforma mobile
+    { x: 390, y: 330, w: 130, h: 15, isSolid: false, speed: 90, xMin: 280, xMax: 590, dir: 1 }
 ];
 
-// Posizioni di spawn per indice giocatore
+// Posizioni valide per lo spawn dei powerup: [x, y] centrati sopra le piattaforme
+const POWERUP_SPAWN_SLOTS = [
+    { x: 170, y: 320 },   // sopra piattaforma laterale sinistra bassa
+    { x: 870, y: 320 },   // sopra piattaforma laterale destra bassa
+    { x: 280, y: 270 },   // sopra piattaforma media sinistra
+    { x: 720, y: 270 },   // sopra piattaforma media destra
+    { x: 500, y: 150 },   // sopra piattaforma alta centrale
+    { x: 175, y: 180 },   // sopra piattaforma laterale alta sinistra
+    { x: 825, y: 180 },   // sopra piattaforma laterale alta destra
+    { x: 500, y: 430 }    // sopra il pavimento, centro
+];
+
 const SPAWN_POSITIONS = [
-    { x: 300, y: 350 },
-    { x: 600, y: 350 }
+    { x: 280, y: 360 },
+    { x: 620, y: 360 }
 ];
 
 // ==========================================
-// 2. FUNZIONI DI SUPPORTO (PURE)
+// 2. FUNZIONI DI SUPPORTO
 // ==========================================
 
-// Applica lo spawn a un giocatore: riposiziona e azzera le velocità
-// Non tocca vite e danno (quello è compito di chi chiama)
 function spawnPlayer(p: PlayerState): void {
     const spawn = SPAWN_POSITIONS[p.spawnIndex];
     p.x = spawn.x;
     p.y = spawn.y;
     p.vx = 0;
     p.vy = 0;
-    p.isOnGround       = false;
-    p.jumpsLeft        = 2;    // al respawn si ripristinano entrambi i salti
+    p.isOnGround        = false;
+    p.jumpsLeft         = 2;
     p.jumpKeyWasPressed = false;
-    p.isAttacking      = false;
-    p.hasHit           = false;
-    p.isDead           = false;
-    p.respawnTimer     = 0;
+    p.isAttacking       = false;
+    p.hasHit            = false;
+    p.hitstun           = 0;
+    p.isDead            = false;
+    p.respawnTimer      = 0;
 }
 
-// Calcola il nome del colore leggibile per il messaggio di vittoria
 function colorName(color: string): string {
     if (color === "#ff0000") {
         return "ROSSO";
@@ -143,25 +183,57 @@ function colorName(color: string): string {
     return "BLU";
 }
 
+// Sceglie un tipo di powerup casuale tra i tre disponibili
+function randomPowerUpType(): PowerUpType {
+    const roll = Math.random();
+    if (roll < 0.33) {
+        return "attack";
+    }
+    if (roll < 0.66) {
+        return "heal";
+    }
+    return "force";
+}
+
+// Colore visivo associato al tipo di powerup
+function powerUpColor(type: PowerUpType): string {
+    if (type === "attack") {
+        return "#00ccff"; // blu elettrico = portata
+    }
+    if (type === "heal") {
+        return "#44ff88"; // verde = cura
+    }
+    return "#ff8800";     // arancione = forza
+}
+
+// Label breve del powerup per l'HUD
+function powerUpLabel(type: PowerUpType): string {
+    if (type === "attack") {
+        return "PORTATA";
+    }
+    if (type === "heal") {
+        return "CURA";
+    }
+    return "FORZA";
+}
+
 // ==========================================
-// 3. IL SERVER (Fisica e Logica)
+// 3. IL SERVER
 // ==========================================
 export class BrawlServer extends GameServer {
-    private players: Record<string, PlayerState> = {};
+    private players:       Record<string, PlayerState> = {};
+    private winnerMessage: string  = "";
+    private gameOver:      boolean = false;
+    private killMessage:   string  = "";
+    private killTimer:     number  = 0;
 
-    // Messaggio finale mostrato quando la partita è conclusa
-    private winnerMessage: string = "";
-
-    // La partita è conclusa solo quando un giocatore ha esaurito le vite
-    private gameOver: boolean = false;
-
-    // Messaggio temporaneo mostrato quando qualcuno muore (kill)
-    // killTimer conta i secondi rimasti prima che scompaia
-    private killMessage: string = "";
-    private killTimer: number = 0;
+    // Powerup presenti sulla mappa
+    private powerUps:       PowerUp[] = [];
+    private powerUpTimer:   number    = POWERUP_SPAWN_INTERVAL; // countdown prossimo spawn
+    private powerUpIdNext:  number    = 0;                      // id progressivo
 
     // ----------------------------------------
-    // INIT: chiamato una sola volta all'avvio
+    // INIT
     // ----------------------------------------
     init(players: any): void {
         this.players = players;
@@ -171,27 +243,23 @@ export class BrawlServer extends GameServer {
         Object.keys(this.players).forEach(id => {
             const p = this.players[id] as PlayerState;
 
-            // Dimensioni del personaggio
-            p.w = 40;
-            p.h = 40;
+            p.w = 38;
+            p.h = 42;
 
-            // Colore e indice
             p.color      = colors[i % 2];
             p.spawnIndex = i;
 
-            // Vite e danno iniziale
             p.lives  = MAX_LIVES;
             p.damage = 0;
 
-            // Stato di morte iniziale
             p.isDead       = false;
             p.respawnTimer = 0;
 
-            // Posizione e fisica iniziale tramite spawn
-            spawnPlayer(p);
-            // jumpsLeft viene già impostato a 2 dentro spawnPlayer
+            p.activePowerUp = null;
+            p.powerUpTimer  = 0;
 
-            // Il primo giocatore guarda a destra, il secondo a sinistra
+            spawnPlayer(p);
+
             if (i === 0) {
                 p.facingRight = true;
             } else {
@@ -203,12 +271,30 @@ export class BrawlServer extends GameServer {
     }
 
     // ----------------------------------------
-    // TICK: chiamato ogni frame
+    // TICK
     // ----------------------------------------
     tick(incomingMessages: IncomingMsg[], dt: number): OutgoingMsg[] {
 
-        // --- Aggiornamento timer kill message ---
-        // Il messaggio scompare dopo KILL_MSG_DURATION secondi
+        // --- Piattaforme mobili ---
+        PLATFORMS.forEach(plat => {
+            if (plat.speed === undefined) {
+                return;
+            }
+
+            plat.x = plat.x + (plat.speed * plat.dir! * dt);
+
+            if (plat.x >= plat.xMax!) {
+                plat.x   = plat.xMax!;
+                plat.dir = -1;
+            }
+
+            if (plat.x <= plat.xMin!) {
+                plat.x   = plat.xMin!;
+                plat.dir = 1;
+            }
+        });
+
+        // --- Kill message timer ---
         if (this.killTimer > 0) {
             this.killTimer = this.killTimer - dt;
             if (this.killTimer <= 0) {
@@ -217,34 +303,65 @@ export class BrawlServer extends GameServer {
             }
         }
 
-        // --- A. LETTURA INPUT ---
-        // Processa solo i giocatori vivi. I morti aspettano il respawn timer.
+        // --- Spawn powerup ---
+        // Contiamo quanti powerup sono ancora attivi sulla mappa
+        let activePowerUpsOnMap = 0;
+        this.powerUps.forEach(pu => {
+            if (pu.active === true) {
+                activePowerUpsOnMap = activePowerUpsOnMap + 1;
+            }
+        });
+
+        // Countdown spawn: scatta solo se c'è spazio
+        if (activePowerUpsOnMap < POWERUP_MAX_ON_MAP) {
+            this.powerUpTimer = this.powerUpTimer - dt;
+            if (this.powerUpTimer <= 0) {
+                this.powerUpTimer = POWERUP_SPAWN_INTERVAL;
+
+                // Scegli uno slot casuale tra quelli disponibili
+                const slotIndex = Math.floor(Math.random() * POWERUP_SPAWN_SLOTS.length);
+                const slot      = POWERUP_SPAWN_SLOTS[slotIndex];
+
+                const newPu: PowerUp = {
+                    id:     this.powerUpIdNext,
+                    x:      slot.x,
+                    y:      slot.y,
+                    type:   randomPowerUpType(),
+                    active: true
+                };
+
+                this.powerUpIdNext = this.powerUpIdNext + 1;
+                this.powerUps.push(newPu);
+            }
+        }
+
+        // Pulizia powerup non attivi (raccolti nei tick precedenti)
+        this.powerUps = this.powerUps.filter(pu => pu.active === true);
+
+        // --- A. INPUT ---
         incomingMessages.forEach(msg => {
-            const p = this.players[msg.clientId];
+            const p    = this.players[msg.clientId];
             const keys = msg.payload.keys;
 
-            // Sicurezza: il giocatore potrebbe non esistere
             if (p === undefined) {
                 return;
             }
 
-            // I morti non ricevono input
             if (p.isDead === true) {
                 return;
             }
 
-            // --- Movimento orizzontale ---
-            // L'input sovrascrive la velocità solo se siamo a terra.
-            // In aria l'input modifica la velocità più debolmente (controllo aereo).
+            if (p.hitstun > 0) {
+                return;
+            }
+
+            // Movimento orizzontale
             if (keys.A === true) {
                 p.facingRight = false;
                 if (p.isOnGround === true) {
-                    // Movimento a terra: velocità istantanea
                     p.vx = -MOVE_SPEED;
                 } else {
-                    // Controllo aereo: spingo verso sinistra ma non blocco lo sbalzo
-                    // Clamp per non superare MOVE_SPEED in aria
-                    p.vx = p.vx - (MOVE_SPEED * 3 * dt);
+                    p.vx = p.vx - (AIR_ACCEL * dt);
                     if (p.vx < -MOVE_SPEED) {
                         p.vx = -MOVE_SPEED;
                     }
@@ -254,28 +371,18 @@ export class BrawlServer extends GameServer {
                 if (p.isOnGround === true) {
                     p.vx = MOVE_SPEED;
                 } else {
-                    p.vx = p.vx + (MOVE_SPEED * 3 * dt);
+                    p.vx = p.vx + (AIR_ACCEL * dt);
                     if (p.vx > MOVE_SPEED) {
                         p.vx = MOVE_SPEED;
                     }
                 }
             }
 
-            // --- Salto doppio ---
-            // Entrambi i salti usano la stessa forza JUMP_FORCE.
-            // Con JUMP_FORCE=600 e GRAVITY=1500 ogni salto copre h = 600²/3000 = 120px.
-            // Due salti = 240px totale, uguale al vecchio salto singolo da 850px/s.
-            // jumpKeyWasPressed evita l'autofire: il salto scatta solo al momento della pressione.
+            // Salto doppio
             if (keys.W === true) {
                 if (p.jumpKeyWasPressed === false) {
                     if (p.jumpsLeft > 0) {
-                        if (p.jumpsLeft === 2) {
-                            // Primo salto da terra
-                            p.vy = -JUMP_FORCE;
-                        } else {
-                            // Secondo salto in aria (doppio salto)
-                            p.vy = -JUMP_FORCE;
-                        }
+                        p.vy         = -JUMP_FORCE;
                         p.jumpsLeft  = p.jumpsLeft - 1;
                         p.isOnGround = false;
                     }
@@ -285,13 +392,9 @@ export class BrawlServer extends GameServer {
                 p.jumpKeyWasPressed = false;
             }
 
-            // --- Attacco ---
-            // Quando si preme SPACE si attiva isAttacking.
-            // hasHit viene resettato solo quando il tasto viene premuto DA ZERO,
-            // così ogni "press" è un nuovo attacco e si può colpire una volta per press.
+            // Attacco
             if (keys.SPACE === true) {
                 if (p.isAttacking === false) {
-                    // Nuovo press: reset del flag per permettere un nuovo colpo
                     p.hasHit = false;
                 }
                 p.isAttacking = true;
@@ -300,35 +403,49 @@ export class BrawlServer extends GameServer {
             }
         });
 
-        // --- B. FISICA, COLLISIONI E MORTE ---
+        // --- B. FISICA E COLLISIONI ---
         Object.keys(this.players).forEach(id => {
             const p = this.players[id];
 
-            // --- Gestione timer di respawn ---
-            // Se il giocatore è morto, contiamo il timer e poi lo rispawniamo
+            // Rispawn
             if (p.isDead === true) {
                 p.respawnTimer = p.respawnTimer - dt;
                 if (p.respawnTimer <= 0) {
                     spawnPlayer(p);
-                    // Il danno si azzera al respawn (come in brawlhalla)
                     p.damage = 0;
+                    // Il powerup si perde alla morte
+                    p.activePowerUp = null;
+                    p.powerUpTimer  = 0;
                 }
-                // Non processiamo altro per questo giocatore
                 return;
             }
 
-            // --- Integrazione della gravità ---
-            p.vy = p.vy + (GRAVITY * dt);
+            // Hitstun
+            if (p.hitstun > 0) {
+                p.hitstun = p.hitstun - dt;
+                if (p.hitstun < 0) {
+                    p.hitstun = 0;
+                }
+            }
 
-            // --- Frizione orizzontale ---
-            // Applicata SOLO quando non c'è input (gestito sopra).
-            // La frizione differisce tra terra e aria.
-            // Attenzione: non vogliamo invertire il segno, quindi usiamo un clamp a 0.
+            // Powerup timer
+            if (p.activePowerUp !== null) {
+                p.powerUpTimer = p.powerUpTimer - dt;
+                if (p.powerUpTimer <= 0) {
+                    p.activePowerUp = null;
+                    p.powerUpTimer  = 0;
+                }
+            }
+
+            // Gravita con cap caduta
+            p.vy = p.vy + (GRAVITY * dt);
+            if (p.vy > MAX_FALL_SPEED) {
+                p.vy = MAX_FALL_SPEED;
+            }
+
+            // Frizione orizzontale
             const friction = p.isOnGround === true ? FRICTION_GROUND : FRICTION_AIR;
 
-            // Frizione applicata solo se non c'è input direzionale in questa direzione.
-            // Questo si fa qui nel tick perché l'input è già stato processato sopra.
-            // Se vx è positivo, lo diminuiamo; se è negativo, lo aumentiamo verso 0.
             if (p.vx > 0) {
                 p.vx = p.vx - (p.vx * friction * dt);
                 if (p.vx < 1) {
@@ -341,54 +458,45 @@ export class BrawlServer extends GameServer {
                 }
             }
 
-            // Memorizziamo la posizione del frame precedente per il CCD (continuous collision)
             const oldX = p.x;
             const oldY = p.y;
 
-            // --- Spostamento ---
             p.x = p.x + (p.vx * dt);
             p.y = p.y + (p.vy * dt);
 
-            // Resettiamo lo stato "a terra" prima di controllare le collisioni
             p.isOnGround = false;
 
-            // --- Collisioni con le piattaforme ---
+            // Collisioni piattaforme
             PLATFORMS.forEach(plat => {
-                // Controllo AABB orizzontale (il giocatore sovrappone la piattaforma in X)
                 const overlapX = (p.x + p.w > plat.x) && (p.x < plat.x + plat.w);
 
                 if (overlapX === false) {
                     return;
                 }
 
-                // --- Collisione dall'alto (atterraggio) ---
-                // Condizioni:
-                // 1. Il giocatore scende (vy >= 0)
-                // 2. Nel frame precedente il piede era sopra (o al livello di) la piattaforma
-                // 3. Ora il piede è sotto il bordo superiore della piattaforma
+                // Atterraggio dall'alto
                 const wasFeetAbove = (oldY + p.h) <= (plat.y + 1);
-                const nowFeetBelow = (p.y + p.h) >= plat.y;
+                const nowFeetBelow = (p.y  + p.h) >= plat.y;
 
                 if (p.vy >= 0) {
                     if (wasFeetAbove === true) {
                         if (nowFeetBelow === true) {
                             p.y          = plat.y - p.h;
                             p.vy         = 0;
-                            p.jumpsLeft  = 2;    // atterrato: ripristina entrambi i salti
+                            p.jumpsLeft  = 2;
                             p.isOnGround = true;
+
+                            if (plat.speed !== undefined) {
+                                p.x = p.x + (plat.speed * plat.dir! * dt);
+                            }
                         }
                     }
                 }
 
-                // --- Collisione dal basso (testa contro soffitto) ---
-                // Solo per piattaforme solide.
-                // Condizioni:
-                // 1. Il giocatore sale (vy < 0)
-                // 2. Nel frame precedente la testa era sotto (o al livello del) il fondo della piattaforma
-                // 3. Ora la testa è sopra il fondo della piattaforma
+                // Testa contro soffitto (solo solide)
                 if (plat.isSolid === true) {
-                    const wasHeadBelow  = oldY >= (plat.y + plat.h - 1);
-                    const nowHeadAbove  = p.y <= (plat.y + plat.h);
+                    const wasHeadBelow = oldY >= (plat.y + plat.h - 1);
+                    const nowHeadAbove = p.y  <= (plat.y + plat.h);
 
                     if (p.vy < 0) {
                         if (wasHeadBelow === true) {
@@ -401,8 +509,43 @@ export class BrawlServer extends GameServer {
                 }
             });
 
-            // --- Controllo uscita dall'arena (MORTE) ---
-            // Controlliamo DOPO le piattaforme così una piattaforma edge non causa morte ingiusta.
+            // --- Raccolta powerup ---
+            // Il centro del player e il centro del powerup devono essere entro POWERUP_RADIUS
+            const px = p.x + p.w / 2;
+            const py = p.y + p.h / 2;
+
+            this.powerUps.forEach(pu => {
+                if (pu.active === false) {
+                    return;
+                }
+
+                const dx   = px - pu.x;
+                const dy   = py - pu.y;
+                const dist = Math.sqrt(dx * dx + dy * dy);
+
+                if (dist > POWERUP_RADIUS + 20) {
+                    return;
+                }
+
+                // Raccolto: applica effetto immediato (cura) o attiva stato
+                pu.active = false;
+
+                if (pu.type === "heal") {
+                    // Cura immediata: riduce il danno
+                    p.damage = p.damage - PU_HEAL_AMOUNT;
+                    if (p.damage < 0) {
+                        p.damage = 0;
+                    }
+                    // La cura non attiva uno stato persistente
+                    return;
+                }
+
+                // Gli altri due tipi si attivano come stato con timer
+                p.activePowerUp = pu.type;
+                p.powerUpTimer  = POWERUP_DURATION;
+            });
+
+            // --- Morte ---
             const isOutOfBounds =
                 p.x < MAP_LIMIT_LEFT   ||
                 p.x > MAP_LIMIT_RIGHT  ||
@@ -410,20 +553,16 @@ export class BrawlServer extends GameServer {
                 p.y > MAP_LIMIT_BOTTOM;
 
             if (isOutOfBounds === true) {
-                // Scala la vita e avvia il timer di respawn
-                p.lives = p.lives - 1;
-                p.isDead = true;
+                p.lives        = p.lives - 1;
+                p.isDead       = true;
                 p.respawnTimer = RESPAWN_TIME;
 
-                // Mostra il messaggio di kill per KILL_MSG_DURATION secondi
                 this.killMessage = "GIOCATORE " + colorName(p.color) + " KO!";
                 this.killTimer   = KILL_MSG_DURATION;
 
-                // Controlla se la partita è finita (vite a zero)
                 if (p.lives <= 0) {
                     if (this.gameOver === false) {
                         this.gameOver = true;
-                        // Troviamo l'avversario per dichiararlo vincitore
                         Object.keys(this.players).forEach(otherId => {
                             if (otherId !== id) {
                                 const winner = this.players[otherId];
@@ -435,9 +574,7 @@ export class BrawlServer extends GameServer {
             }
         });
 
-        // --- C. LOGICA COMBATTIMENTO ---
-        // Separato dalla fisica per chiarezza.
-        // Solo i giocatori vivi possono attaccare.
+        // --- C. COMBATTIMENTO ---
         Object.keys(this.players).forEach(id => {
             const p = this.players[id];
 
@@ -449,22 +586,25 @@ export class BrawlServer extends GameServer {
                 return;
             }
 
-            // Se ha già colpito in questo press, non colpisce di nuovo
             if (p.hasHit === true) {
                 return;
             }
 
-            // Calcola la hitbox dell'attacco
+            // Portata attacco: base + bonus se powerup "attack" attivo
+            let currentAttackW = ATTACK_W_BASE;
+            if (p.activePowerUp === "attack") {
+                currentAttackW = currentAttackW + PU_ATTACK_BONUS_W;
+            }
+
             const attackY = p.y + ATTACK_Y_OFFSET;
-            let attackX   = 0;
+            let   attackX = 0;
 
             if (p.facingRight === true) {
                 attackX = p.x + p.w;
             } else {
-                attackX = p.x - ATTACK_W;
+                attackX = p.x - currentAttackW;
             }
 
-            // Controlla collisione con tutti gli altri giocatori
             Object.keys(this.players).forEach(victimId => {
                 const victim = this.players[victimId];
 
@@ -476,8 +616,7 @@ export class BrawlServer extends GameServer {
                     return;
                 }
 
-                // AABB tra hitbox attacco e corpo vittima
-                const hitX = (attackX < victim.x + victim.w) && (attackX + ATTACK_W > victim.x);
+                const hitX = (attackX < victim.x + victim.w) && (attackX + currentAttackW > victim.x);
                 const hitY = (attackY < victim.y + victim.h) && (attackY + ATTACK_H > victim.y);
 
                 if (hitX === false) {
@@ -488,21 +627,28 @@ export class BrawlServer extends GameServer {
                     return;
                 }
 
-                // --- Colpito! ---
+                // Colpito
                 p.hasHit = true;
 
-                // Incrementa il danno della vittima
-                victim.damage = victim.damage + DAMAGE_PER_HIT;
+                // Danno base + bonus forza
+                let hitDamage = DAMAGE_PER_HIT;
+                if (p.activePowerUp === "force") {
+                    hitDamage = hitDamage + PU_FORCE_DMG_BONUS;
+                }
 
-                // Calcola il moltiplicatore dello sbalzo basato sul danno accumulato.
-                // Formula: più danno hai, più voli lontano. Cap per evitare valori assurdi.
-                let multiplier = 1 + (victim.damage / KNOCKBACK_SCALING);
+                victim.damage = victim.damage + hitDamage;
+
+                // Moltiplicatore knockback
+                let multiplier = 1 + (victim.damage / KNOCKBACK_SCALE);
                 if (multiplier > KNOCKBACK_CAP) {
                     multiplier = KNOCKBACK_CAP;
                 }
 
-                // Sbalzo orizzontale: direzione determinata da dove guarda l'attaccante
+                // Knockback orizzontale + bonus forza
                 let finalVx = BASE_KNOCKBACK_X * multiplier;
+                if (p.activePowerUp === "force") {
+                    finalVx = finalVx + PU_FORCE_KB_BONUS;
+                }
 
                 if (p.facingRight === true) {
                     victim.vx = finalVx;
@@ -510,19 +656,23 @@ export class BrawlServer extends GameServer {
                     victim.vx = -finalVx;
                 }
 
-                // Sbalzo verticale: proporzionale a quello orizzontale, sempre verso l'alto.
-                // Così il colpo manda principalmente di lato, con una componente verticale
-                // che cresce insieme allo sbalzo orizzontale ma non lo supera mai.
-                victim.vy = -(finalVx * KNOCKBACK_Y_RATIO);
+                // Knockback verticale
+                victim.vy = -(BASE_KNOCKBACK_Y * multiplier);
 
-                // La vittima perde il contatto col suolo e i salti rimanenti
+                victim.hitstun    = HITSTUN_DURATION;
                 victim.isOnGround = false;
                 victim.jumpsLeft  = 0;
             });
         });
 
-        // Inviamo lo stato aggiornato a tutti i client
-        return [{ payload: { players: this.players, winnerMessage: this.winnerMessage, killMessage: this.killMessage } }];
+        return [{ payload: {
+            players:       this.players,
+            winnerMessage: this.winnerMessage,
+            killMessage:   this.killMessage,
+            platforms:     PLATFORMS,
+            powerUps:      this.powerUps,
+            gameOver:      this.gameOver
+        }}];
     }
 
     isFinished(): boolean {
@@ -531,14 +681,19 @@ export class BrawlServer extends GameServer {
 }
 
 // ==========================================
-// 4. IL CLIENT (Grafica e Input)
+// 4. IL CLIENT
 // ==========================================
 export class BrawlClient extends GameClient {
-    private players: any = null;
+    private players:       any    = null;
     private winnerMessage: string = "";
-    private killMessage: string = "";
+    private killMessage:   string = "";
+    private platforms:     any[]  = PLATFORMS;
+    private powerUps:      any[]  = [];
+    private gameOver: boolean = false;
 
-    // Stato corrente dei tasti premuti
+    // Accumulatore tempo per animazione glow powerup
+    private time: number = 0;
+
     private keys: Record<string, boolean> = {
         A:     false,
         D:     false,
@@ -549,19 +704,51 @@ export class BrawlClient extends GameClient {
     constructor(userInput: UserInput, myId: string) {
         super(userInput, myId);
 
-        // Registriamo i listener una sola volta nel costruttore
         window.addEventListener('keydown', (e) => {
-            if (e.code === 'KeyA')   { this.keys.A     = true; }
-            if (e.code === 'KeyD')   { this.keys.D     = true; }
-            if (e.code === 'KeyW')   { this.keys.W     = true; }
-            if (e.code === 'Space')  { this.keys.SPACE = true; }
+            if (e.code === 'KeyA')  { this.keys.A     = true; }
+            if (e.code === 'KeyD')  { this.keys.D     = true; }
+            if (e.code === 'KeyW')  { this.keys.W     = true; }
+            if (e.code === 'Space') { this.keys.SPACE = true; }
         });
 
         window.addEventListener('keyup', (e) => {
-            if (e.code === 'KeyA')   { this.keys.A     = false; }
-            if (e.code === 'KeyD')   { this.keys.D     = false; }
-            if (e.code === 'KeyW')   { this.keys.W     = false; }
-            if (e.code === 'Space')  { this.keys.SPACE = false; }
+            if (e.code === 'KeyA')  { this.keys.A     = false; }
+            if (e.code === 'KeyD')  { this.keys.D     = false; }
+            if (e.code === 'KeyW')  { this.keys.W     = false; }
+            if (e.code === 'Space') { this.keys.SPACE = false; }
+        });
+
+        // Click sui pulsanti post-match
+        // Le coordinate dei pulsanti dipendono da screenW/screenH che cambiano,
+        // quindi ricalcoliamo ogni click in base alle dimensioni correnti.
+        window.addEventListener('click', (e) => {
+            if (this.winnerMessage === "") {
+                return;
+            }
+
+            const { screenW, screenH } = this.userInput;
+
+            const btnW   = 160;
+            const btnH   = 44;
+            const gap    = 20;
+            const totalW = btnW * 2 + gap;
+            const startX = screenW / 2 - totalW / 2;
+            const btnY   = screenH / 2 + 20;
+            const lobbyX = startX + btnW + gap;
+
+            const mx = e.clientX;
+            const my = e.clientY;
+
+            // Click su LOBBY: torna alla pagina precedente (la lobby del professore)
+            const inLobby =
+                mx >= lobbyX       &&
+                mx <= lobbyX + btnW &&
+                my >= btnY         &&
+                my <= btnY + btnH;
+
+            if ( inLobby ) {
+                this.gameOver = true;
+            }
         });
     }
 
@@ -569,10 +756,7 @@ export class BrawlClient extends GameClient {
         return Promise.resolve();
     }
 
-    // Ricezione dei dati dal server
     handleMessage(message: any): void {
-        // Il framework potrebbe wrappare i dati dentro "payload" oppure no.
-        // Gestiamo entrambi i casi.
         if (message.payload !== undefined) {
             if (message.payload.players !== undefined) {
                 this.players = message.payload.players;
@@ -582,6 +766,15 @@ export class BrawlClient extends GameClient {
             }
             if (message.payload.killMessage !== undefined) {
                 this.killMessage = message.payload.killMessage;
+            }
+            if (message.payload.platforms !== undefined) {
+                this.platforms = message.payload.platforms;
+            }
+            if (message.payload.powerUps !== undefined) {
+                this.powerUps = message.payload.powerUps;
+            }
+            if (message.payload.gameOver !== undefined) {
+                this.gameOver = message.payload.gameOver;
             }
         } else {
             if (message.players !== undefined) {
@@ -593,10 +786,15 @@ export class BrawlClient extends GameClient {
             if (message.killMessage !== undefined) {
                 this.killMessage = message.killMessage;
             }
+            if (message.platforms !== undefined) {
+                this.platforms = message.platforms;
+            }
+            if (message.powerUps !== undefined) {
+                this.powerUps = message.powerUps;
+            }
         }
     }
 
-    // Invia l'input del giocatore al server ogni frame
     flushMessages(): any[] {
         return [{
             kind: 'input',
@@ -610,22 +808,26 @@ export class BrawlClient extends GameClient {
     }
 
     // ----------------------------------------
-    // DRAW: rendering di tutto il frame
+    // DRAW
     // ----------------------------------------
     draw(ctx: CanvasRenderingContext2D, dt: number): void {
-        // Se non abbiamo ancora ricevuto dati dal server, non disegniamo nulla
         if (this.players === null) {
             return;
         }
 
+        this.time = this.time + dt;
+
         const { screenW, screenH } = this.userInput;
 
-        // --- Sfondo ---
-        ctx.fillStyle = "#87CEEB";
+        // Sfondo gradiente scuro
+        const grad = ctx.createLinearGradient(0, 0, 0, screenH);
+        grad.addColorStop(0,   "#1a1a2e");
+        grad.addColorStop(0.6, "#16213e");
+        grad.addColorStop(1,   "#0f3460");
+        ctx.fillStyle = grad;
         ctx.fillRect(0, 0, screenW, screenH);
 
-        // --- Trasformazione camera ---
-        // Scala e centra il mondo virtuale sullo schermo reale.
+        // Trasformazione camera
         ctx.save();
         const scaleX  = screenW / VIRTUAL_W;
         const scaleY  = screenH / VIRTUAL_H;
@@ -635,84 +837,265 @@ export class BrawlClient extends GameClient {
         ctx.translate(offsetX, offsetY);
         ctx.scale(scale, scale);
 
-        // --- Piattaforme ---
-        PLATFORMS.forEach(plat => {
+        // Piattaforme
+        this.drawPlatforms(ctx);
+
+        // Powerup sulla mappa
+        this.drawPowerUps(ctx);
+
+        // Giocatori
+        this.drawPlayers(ctx);
+
+        ctx.restore();
+
+        // HUD (fuori dalla camera)
+        this.drawHUD(ctx, screenW, screenH);
+
+        // Messaggi centrali in alto
+        this.drawMessages(ctx, screenW, screenH);
+    }
+
+    // ----------------------------------------
+    // DRAW: piattaforme
+    // ----------------------------------------
+    private drawPlatforms(ctx: CanvasRenderingContext2D): void {
+        this.platforms.forEach((plat: any) => {
+            const isMobile = plat.speed !== undefined;
+
+            // Ombra
+            ctx.fillStyle = "rgba(0, 0, 0, 0.3)";
+            ctx.fillRect(plat.x + 4, plat.y + 6, plat.w, plat.h);
+
             if (plat.isSolid === true) {
-                ctx.fillStyle = "#5a5a5a";
+                ctx.fillStyle = "#4a4a5a";
+                ctx.fillRect(plat.x, plat.y, plat.w, plat.h);
+                // Bordo superiore chiaro
+                ctx.fillStyle = "#6a6a7a";
+                ctx.fillRect(plat.x, plat.y, plat.w, 6);
+            } else if (isMobile === true) {
+                ctx.fillStyle = "#7a4a2a";
+                ctx.fillRect(plat.x, plat.y, plat.w, plat.h);
+                ctx.fillStyle = "#c07840";
+                ctx.fillRect(plat.x, plat.y, plat.w, 5);
             } else {
-                ctx.fillStyle = "#2E8B57";
+                ctx.fillStyle = "#2a5a38";
+                ctx.fillRect(plat.x, plat.y, plat.w, plat.h);
+                ctx.fillStyle = "#48a060";
+                ctx.fillRect(plat.x, plat.y, plat.w, 5);
             }
-            ctx.fillRect(plat.x, plat.y, plat.w, plat.h);
-
-            ctx.strokeStyle = "#000000";
-            ctx.lineWidth   = 2;
-            ctx.strokeRect(plat.x, plat.y, plat.w, plat.h);
         });
+    }
 
-        // --- Giocatori ---
+    // ----------------------------------------
+    // DRAW: powerup sulla mappa
+    // ----------------------------------------
+    private drawPowerUps(ctx: CanvasRenderingContext2D): void {
+        this.powerUps.forEach((pu: any) => {
+            if (pu.active === false) {
+                return;
+            }
+
+            const color = powerUpColor(pu.type as PowerUpType);
+
+            // Glow pulsante: varia l'alpha con il seno del tempo
+            const pulse     = Math.sin(this.time * 4) * 0.3 + 0.5;
+            const glowSize  = 22 + Math.sin(this.time * 4) * 4;
+
+            // Alone esterno
+            ctx.fillStyle = color.replace(")", ", " + (pulse * 0.4) + ")").replace("rgb", "rgba");
+            ctx.beginPath();
+            ctx.arc(pu.x, pu.y, glowSize, 0, Math.PI * 2);
+            ctx.fill();
+
+            // Cerchio principale
+            ctx.fillStyle = color;
+            ctx.beginPath();
+            ctx.arc(pu.x, pu.y, 14, 0, Math.PI * 2);
+            ctx.fill();
+
+            // Bordo bianco
+            ctx.strokeStyle = "rgba(255, 255, 255, 0.8)";
+            ctx.lineWidth   = 2;
+            ctx.beginPath();
+            ctx.arc(pu.x, pu.y, 14, 0, Math.PI * 2);
+            ctx.stroke();
+
+            // Icona testuale al centro
+            ctx.fillStyle  = "#ffffff";
+            ctx.font       = "bold 11px Arial";
+            ctx.textAlign  = "center";
+
+            if (pu.type === "attack") {
+                ctx.fillText("+A", pu.x, pu.y + 4);
+            }
+
+            if (pu.type === "heal") {
+                ctx.fillText("+H", pu.x, pu.y + 4);
+            }
+
+            if (pu.type === "force") {
+                ctx.fillText("+F", pu.x, pu.y + 4);
+            }
+        });
+    }
+
+    // ----------------------------------------
+    // DRAW: giocatori con occhi e fascetta
+    // ----------------------------------------
+    private drawPlayers(ctx: CanvasRenderingContext2D): void {
         Object.keys(this.players).forEach(id => {
             const p = this.players[id];
 
-            // I giocatori morti non si disegnano (sono in respawn)
             if (p.isDead === true) {
                 return;
             }
 
-            // Corpo del personaggio
+            const cx = p.x + p.w / 2; // centro X del player
+
+            // Ombra ellittica sul pavimento
+            ctx.fillStyle = "rgba(0, 0, 0, 0.2)";
+            ctx.beginPath();
+            ctx.ellipse(cx, 455, p.w / 2, 5, 0, 0, Math.PI * 2);
+            ctx.fill();
+
+            // Glow del powerup attivo attorno al body
+            if (p.activePowerUp !== null) {
+                const puColor   = powerUpColor(p.activePowerUp as PowerUpType);
+                const glowAlpha = Math.sin(this.time * 6) * 0.3 + 0.45;
+                ctx.fillStyle   = puColor.replace(")", ", " + glowAlpha + ")").replace("rgb", "rgba");
+                ctx.fillRect(p.x - 5, p.y - 5, p.w + 10, p.h + 10);
+            }
+
+            // --- Body ---
             ctx.fillStyle = p.color;
             ctx.fillRect(p.x, p.y, p.w, p.h);
 
-            // Contorno per visibilità
-            ctx.strokeStyle = "rgba(0,0,0,0.6)";
+            // Highlight superiore per dare volume
+            ctx.fillStyle = "rgba(255, 255, 255, 0.20)";
+            ctx.fillRect(p.x + 2, p.y + 2, p.w - 4, p.h * 0.30);
+
+            // Contorno body
+            ctx.strokeStyle = "rgba(0, 0, 0, 0.75)";
             ctx.lineWidth   = 2;
             ctx.strokeRect(p.x, p.y, p.w, p.h);
 
-            // Percentuale danno sopra il personaggio
-            ctx.fillStyle   = "white";
-            ctx.font        = "bold 16px Arial";
-            ctx.textAlign   = "center";
-            ctx.fillText(p.damage + "%", p.x + (p.w / 2), p.y - 8);
+            // --- Fascetta sportiva in testa ---
+            // Fascia bianca sopra il body
+            ctx.fillStyle = "white";
+            ctx.fillRect(p.x, p.y, p.w, 8);
 
-            // Hitbox attacco visiva (quadrato giallo)
+            // Striscia colorata al centro della fascetta
+            ctx.fillStyle = p.color === "#ff0000" ? "#aa0000" : "#0000aa";
+            ctx.fillRect(p.x, p.y + 2, p.w, 4);
+
+            // Contorno fascetta
+            ctx.strokeStyle = "rgba(0,0,0,0.5)";
+            ctx.lineWidth   = 1;
+            ctx.strokeRect(p.x, p.y, p.w, 8);
+
+            // --- Occhi ---
+            // Gli occhi cambiano lato in base alla direzione
+            // Occhio destro e sinistro: sfondo bianco + pupilla nera
+            const eyeY      = p.y + 14;
+            const eyeRadius = 4;
+
+            let eyeLeftX  = 0;
+            let eyeRightX = 0;
+
+            // Gli occhi si trovano sul lato della faccia (dove il player guarda)
+            if (p.facingRight === true) {
+                // Faccia a destra: occhi sul lato destro del body
+                eyeLeftX  = p.x + p.w - 22;
+                eyeRightX = p.x + p.w - 8;
+            } else {
+                // Faccia a sinistra: occhi sul lato sinistro del body
+                eyeLeftX  = p.x + 8;
+                eyeRightX = p.x + 22;
+            }
+
+            // Bianco dell'occhio sinistro
+            ctx.fillStyle = "white";
+            ctx.beginPath();
+            ctx.arc(eyeLeftX, eyeY, eyeRadius, 0, Math.PI * 2);
+            ctx.fill();
+
+            // Bianco dell'occhio destro
+            ctx.beginPath();
+            ctx.arc(eyeRightX, eyeY, eyeRadius, 0, Math.PI * 2);
+            ctx.fill();
+
+            // Pupilla sinistra: leggermente spostata nella direzione di sguardo
+            ctx.fillStyle = "#111111";
+            ctx.beginPath();
+
+            if (p.facingRight === true) {
+                ctx.arc(eyeLeftX + 1,  eyeY, 2, 0, Math.PI * 2);
+            } else {
+                ctx.arc(eyeLeftX - 1,  eyeY, 2, 0, Math.PI * 2);
+            }
+
+            ctx.fill();
+
+            // Pupilla destra
+            ctx.beginPath();
+
+            if (p.facingRight === true) {
+                ctx.arc(eyeRightX + 1, eyeY, 2, 0, Math.PI * 2);
+            } else {
+                ctx.arc(eyeRightX - 1, eyeY, 2, 0, Math.PI * 2);
+            }
+
+            ctx.fill();
+
+            // Contorno occhi
+            ctx.strokeStyle = "rgba(0,0,0,0.4)";
+            ctx.lineWidth   = 1;
+            ctx.beginPath();
+            ctx.arc(eyeLeftX,  eyeY, eyeRadius, 0, Math.PI * 2);
+            ctx.stroke();
+            ctx.beginPath();
+            ctx.arc(eyeRightX, eyeY, eyeRadius, 0, Math.PI * 2);
+            ctx.stroke();
+
+            // --- Percentuale danno sopra il player ---
+            // Colore che vira verso il rosso con l'aumentare del danno
+            const dmgRatio = Math.min(p.damage / 150, 1);
+            const r        = Math.round(180 + dmgRatio * 75);
+            const g        = Math.round(180 - dmgRatio * 160);
+            ctx.fillStyle  = "rgb(" + r + ", " + g + ", 80)";
+            ctx.font       = "bold 14px Arial";
+            ctx.textAlign  = "center";
+            ctx.fillText(p.damage + "%", cx, p.y - 6);
+
+            // --- Effetto attacco ---
+            // Calcola portata attuale (con eventuale bonus powerup)
+            let currentAttackW = ATTACK_W_BASE;
+            if (p.activePowerUp === "attack") {
+                currentAttackW = currentAttackW + PU_ATTACK_BONUS_W;
+            }
+
             if (p.isAttacking === true) {
-                ctx.fillStyle = "rgba(255, 220, 0, 0.85)";
-
+                // Alone arancione esterno
+                ctx.fillStyle = "rgba(255, 180, 0, 0.30)";
                 if (p.facingRight === true) {
-                    ctx.fillRect(p.x + p.w, p.y + ATTACK_Y_OFFSET, ATTACK_W, ATTACK_H);
+                    ctx.fillRect(p.x + p.w - 4,      p.y + ATTACK_Y_OFFSET - 5, currentAttackW + 8, ATTACK_H + 10);
                 } else {
-                    ctx.fillRect(p.x - ATTACK_W, p.y + ATTACK_Y_OFFSET, ATTACK_W, ATTACK_H);
+                    ctx.fillRect(p.x - currentAttackW - 4, p.y + ATTACK_Y_OFFSET - 5, currentAttackW + 8, ATTACK_H + 10);
+                }
+
+                // Hitbox gialla
+                ctx.fillStyle = "rgba(255, 220, 0, 0.80)";
+                if (p.facingRight === true) {
+                    ctx.fillRect(p.x + p.w,      p.y + ATTACK_Y_OFFSET, currentAttackW, ATTACK_H);
+                } else {
+                    ctx.fillRect(p.x - currentAttackW, p.y + ATTACK_Y_OFFSET, currentAttackW, ATTACK_H);
                 }
             }
         });
-
-        // Ripristina la trasformazione camera prima di disegnare l'HUD
-        ctx.restore();
-
-        // --- HUD in alto ---
-        // Disegnato in coordinate schermo (fuori dalla camera scalata)
-        this.drawHUD(ctx, screenW, screenH);
-
-        // --- Messaggio di kill temporaneo ---
-        // Appare al centro-alto quando qualcuno esce dall'arena, poi scompare
-        if (this.killMessage !== "") {
-            ctx.fillStyle = "#FF4400";
-            ctx.font      = "bold 22px Arial";
-            ctx.textAlign = "center";
-            ctx.fillText(this.killMessage, screenW / 2, screenH / 2 - 20);
-        }
-
-        // --- Messaggio di vittoria finale ---
-        // Senza sfondo: testo semplice sopra tutto
-        if (this.winnerMessage !== "") {
-            ctx.fillStyle = "#FFD700";
-            ctx.font      = "bold 40px Arial";
-            ctx.textAlign = "center";
-            ctx.fillText(this.winnerMessage, screenW / 2, screenH / 2);
-        }
     }
 
     // ----------------------------------------
-    // DRAW HUD: pannelli in alto con vite e danno
+    // HUD: pannelli in alto a sinistra e destra
     // ----------------------------------------
     private drawHUD(ctx: CanvasRenderingContext2D, screenW: number, screenH: number): void {
         const playerIds = Object.keys(this.players);
@@ -720,43 +1103,103 @@ export class BrawlClient extends GameClient {
         playerIds.forEach((id, index) => {
             const p = this.players[id];
 
-            // Pannello sinistro per il giocatore 0, destro per il giocatore 1
-            let hudX = 20;
+            let hudX = 16;
             if (index === 1) {
-                hudX = screenW - 160;
+                hudX = screenW - 170;
             }
-            const hudY = 10;
+            const hudY  = 10;
+            const hudW  = 154;
+            const hudH  = p.activePowerUp !== null ? 72 : 52; // si allarga con powerup attivo
 
-            // Sfondo pannello
-            ctx.fillStyle = "rgba(0, 0, 0, 0.55)";
-            ctx.fillRect(hudX, hudY, 140, 55);
+            // Sfondo
+            ctx.fillStyle = "rgba(0, 0, 0, 0.65)";
+            ctx.fillRect(hudX, hudY, hudW, hudH);
 
-            // Bordo colorato del giocatore
+            // Bordo colorato del player
             ctx.strokeStyle = p.color;
-            ctx.lineWidth   = 3;
-            ctx.strokeRect(hudX, hudY, 140, 55);
+            ctx.lineWidth   = 2;
+            ctx.strokeRect(hudX, hudY, hudW, hudH);
 
-            // Riga 1: nome colore e stato
-            ctx.fillStyle = "white";
             ctx.font      = "bold 13px Arial";
             ctx.textAlign = "left";
 
+            // Riga 1: danno o respawn
             if (p.isDead === true) {
-                ctx.fillStyle = "#aaaaaa";
-                ctx.fillText("RESPAWN...", hudX + 8, hudY + 19);
+                ctx.fillStyle = "#888888";
+                ctx.fillText("RESPAWN...", hudX + 8, hudY + 20);
             } else {
                 ctx.fillStyle = "white";
-                ctx.fillText("DANNO: " + p.damage + "%", hudX + 8, hudY + 19);
+                ctx.fillText("DANNO: " + p.damage + "%", hudX + 8, hudY + 20);
             }
 
-            // Riga 2: vite rimanenti come numero
+            // Riga 2: vite
             ctx.fillStyle = p.color;
-            ctx.font      = "bold 13px Arial";
-            ctx.fillText("VITE: " + p.lives + " / " + MAX_LIVES, hudX + 8, hudY + 41);
+            ctx.fillText("VITE: " + p.lives + " / " + MAX_LIVES, hudX + 8, hudY + 40);
+
+            // Riga 3 (solo se powerup attivo): tipo + timer
+            if (p.activePowerUp !== null) {
+                const puColor  = powerUpColor(p.activePowerUp as PowerUpType);
+                const label    = powerUpLabel(p.activePowerUp as PowerUpType);
+                const timerSec = Math.ceil(p.powerUpTimer);
+
+                ctx.fillStyle = puColor;
+                ctx.fillText(label + " " + timerSec + "s", hudX + 8, hudY + 60);
+            }
         });
     }
 
+    // ----------------------------------------
+    // Messaggi centrali: KO e vittoria, in alto
+    // ----------------------------------------
+    private drawMessages(ctx: CanvasRenderingContext2D, screenW: number, screenH: number): void {
+        // Messaggi nella zona alta, testo semplice senza sfondo
+        const msgY = 62;
+
+        // KO: solo testo arancione
+        if (this.killMessage !== "") {
+            ctx.fillStyle = "#ff6622";
+            ctx.font      = "bold 20px Arial";
+            ctx.textAlign = "center";
+            ctx.fillText(this.killMessage, screenW / 2, msgY);
+        }
+
+        // Vittoria: testo dorato + pulsanti sotto
+        if (this.winnerMessage !== "") {
+            ctx.fillStyle = "#FFD700";
+            ctx.font      = "bold 26px Arial";
+            ctx.textAlign = "center";
+            ctx.fillText(this.winnerMessage, screenW / 2, msgY);
+
+            // Pulsanti post-match centrati a meta schermo
+            this.drawEndButtons(ctx, screenW, screenH);
+        }
+    }
+
+    // ----------------------------------------
+    // Pulsanti fine match: RIVINCITA e LOBBY
+    // ----------------------------------------
+    private drawEndButtons(ctx: CanvasRenderingContext2D, screenW: number, screenH: number): void {
+        const btnW   = 160;
+        const btnH   = 44;
+        const gap    = 20;
+        const totalW = btnW * 2 + gap;
+        const startX = screenW / 2 - totalW / 2;
+        const btnY   = screenH / 2 + 20;
+
+        // Pulsante LOBBY
+        const lobbyX = startX + btnW + gap;
+        ctx.fillStyle = "rgba(60, 60, 180, 0.85)";
+        ctx.fillRect(lobbyX, btnY, btnW, btnH);
+        ctx.strokeStyle = "#8888ff";
+        ctx.lineWidth   = 2;
+        ctx.strokeRect(lobbyX, btnY, btnW, btnH);
+        ctx.fillStyle   = "white";
+        ctx.font        = "bold 16px Arial";
+        ctx.textAlign   = "center";
+        ctx.fillText("TORNA LOBBY", lobbyX + btnW / 2, btnY + 28);
+    }
+
     isFinished(): boolean {
-        return false;
+        return this.gameOver;
     }
 }
