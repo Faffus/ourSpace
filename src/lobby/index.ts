@@ -175,10 +175,6 @@ export class LobbyServer {
         if (this.currentProposal) {
             this.currentProposal.acceptedPlayerIds.delete(id);
         }
-
-        for (const gameId in this.games) {
-            this.games[gameId].clientClosed(id);
-        }
         
         this.outgoingMessages.push({
             payload: {
