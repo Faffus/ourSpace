@@ -1,17 +1,7 @@
 /**
- * MicroRacingGame.ts  —  "Circuit Ourspace"
- * ==========================================
- * Flusso: Qualifiche (3 min) → Recap griglia → Semaforo → Gara (3 giri) → DNF / Finale → Podio
- *
- * FUNZIONALITÀ IMPLEMENTATE:
- *  1. DNF Timer       – 30s dopo il primo classificato, poi DNF a chi non ha finito.
- *  2. Ghosting        – In qualifica le auto si attraversano e sono semi-trasparenti.
- *  3. Semaforo        – 4 luci rosse + GO! prima del via, input bloccati nel frattempo.
- *  4. Fuori pista     – Erba: attrito alto, accel ridotta, vel max dimezzata, giro invalido.
- *  5. 8 Checkpoint    – Distribuiti su tutto il giro, impediscono tagli aggressivi.
- *  6. Scia            – Bonus +15% vel max nel cono posteriore dell'avversario.
- *
- * ARCHITETTURA: GameServer (Node.js autoritative) + GameClient (browser, interpolazione).
+ * Micro Racing - Circuit Ourspace.
+ * Server autoritativo Node.js e client canvas interpolato.
+ * Fasi: qualifiche, recap griglia, semaforo, gara, DNF/finale.
  */
 
 import { Player }                   from '../common';
@@ -20,10 +10,26 @@ import { GameClient, GameServer }   from './game';
 import { UserInput }                from '../client/user-input';
 import { getCharacterDrawFunction } from '../client/characters';
 
+type Punto = { x: number; y: number };
+type StatoRigaClassifica = {
+    y: number;
+    targetY: number;
+    lastIndex: number;
+    lastBestGiro: number;
+    flash: number;
+};
+type RigaClassificaAnimata = {
+    id: string;
+    auto: StatoAuto;
+    index: number;
+    y: number;
+    delta: number;
+    flash: number;
+    improved: boolean;
+};
 
-// ═══════════════════════════════════════════════════════════════════════════════
-//  TRACCIATO  —  "Circuit Ourspace"
-// ═══════════════════════════════════════════════════════════════════════════════
+
+//  TRACCIATO
 
 const MONDO_W = 4800;
 const MONDO_H = 3800;
@@ -36,7 +42,7 @@ const MARGINE_QUALI = 10; // px di tolleranza per evitare falsi track-limits in 
  * così la griglia di partenza (posizionata ~200px più a sud) non coincide mai
  * con il raggio del traguardo all'avvio → nessun falso "primo giro".
  */
-const WAYPOINTS: { x: number; y: number }[] = [
+const WAYPOINTS: Punto[] = [
     // Rettilineo principale (lato est, verso nord)
     { x: 3800, y: 2400 },   // 0  — griglia qui (sotto il traguardo)
     { x: 3800, y: 2100 },   // 1  — traguardo a y≈2250, tra qui e il punto precedente
@@ -101,17 +107,39 @@ const CHECKPOINTS = [
     { x: 2150, y: 2620, r: 90 },  // CP7: doppia chicane sud-est
     { x: 3200, y: 2750, r: 90 },  // CP8: lancio verso traguardo
 ];
+const TUTTI_CHECKPOINT = (1 << CHECKPOINTS.length) - 1;
+const CHECKPOINTS_WAYPOINT_INDEX = CHECKPOINTS.map(cp => {
+    let bestIndex = 0;
+    let bestDist = Infinity;
 
-// Il traguardo è posizionato sopra la griglia di partenza sul rettilineo est.
-// Le auto partono a y≈2400+, il traguardo è a y=2250 → mai sovrapposti.
-const TRAGUARDO    = { x: 3800, y: 2250, r: 80 };
+    for (let i = 0; i < WAYPOINTS.length; i++) {
+        const wp = WAYPOINTS[i];
+        const dist = Math.hypot(cp.x - wp.x, cp.y - wp.y);
+        if (dist < bestDist) {
+            bestDist = dist;
+            bestIndex = i;
+        }
+    }
+
+    return bestIndex;
+});
+
+// Il traguardo è una fascia stretta centrata sulla linea di arrivo.
+const TRAGUARDO    = { x: 3800, y: 2250 };
+const TRAGUARDO_LARGHEZZA = LARGHEZZA_PISTA + 18;
+const TRAGUARDO_ALTEZZA = 16;
 // Offset griglia: file alternate a sinistra/destra, avanzano verso sud (y crescente)
 const GRIGLIA_BASE = { dx: 35, dy: 90 };
 
+const LUNGHEZZE_SEGMENTI = WAYPOINTS.map((p, i) => {
+    const next = WAYPOINTS[(i + 1) % WAYPOINTS.length];
+    return Math.hypot(next.x - p.x, next.y - p.y);
+});
+const DISTANZE_WAYPOINT = distanzeCumulative(LUNGHEZZE_SEGMENTI);
+const LUNGHEZZA_TRACCIATO = LUNGHEZZE_SEGMENTI.reduce((tot, len) => tot + len, 0);
 
-// ═══════════════════════════════════════════════════════════════════════════════
+
 //  COSTANTI FISICHE
-// ═══════════════════════════════════════════════════════════════════════════════
 
 const ACCEL          = 290;    // px/s² accelerazione su asfalto
 const FRENO          = 560;    // px/s² frenata
@@ -119,50 +147,46 @@ const ATTRITO        = 120;    // px/s² attrito passivo su asfalto
 const STERZO_RAD     = 3.8;   // rad/s velocità di sterzata
 const VEL_MAX        = 315;    // px/s velocità massima su asfalto
 
-// ── Penalità fuori pista (punto 4) ────────────────────────────────────────────
 // L'auto non rimbalza ma viene fortemente penalizzata sull'erba.
 const ERBA_ACCEL_MULT  = 0.5;   // accelerazione ridotta al 50%
 const ERBA_VELMAX_MULT = 0.4;   // velocità massima ridotta al 40%
-const ERBA_ATTRITO_ADD = 0;     // attrito aggiuntivo sull'erba (si somma a ATTRITO)
+const ERBA_ATTRITO_ADD = 10;    // attrito aggiuntivo sull'erba (si somma a ATTRITO)
 //   → attrito totale su erba = 130 px/s² — resta lento ma può rientrare da fermo
 
 const DRIFT          = 0.86;   // ritenzione velocità laterale (effetto derapata)
 
-// ── Turbo ─────────────────────────────────────────────────────────────────────
 const TURBO_BONUS    = 1.80;
 const TURBO_DURATA   = 0.8;    // secondi
 const TURBO_RICARICA = 4.0;    // secondi cooldown
 
-// ── Olio ──────────────────────────────────────────────────────────────────────
 const OLIO_RAGGIO    = 20;     // px raggio chiazza
 const OLIO_SPIN      = 1.4;    // secondi di spin-out
 const OLIO_RICARICA  = 5.0;
 const OLIO_VITA      = 25.0;
 
-// ── Timing di gara ────────────────────────────────────────────────────────────
-const DURATA_QUALIFICHE = 100;  // secondi (TODO: rimettere a 180 = 3 min per produzione)
+const GIRI_GARA         = 1;  //TODO 3 , ORA VERSIONE TEST RAPIDA
+const DURATA_QUALIFICHE = 100;  // TODO 2 min, ora versione test rapida
 const DURATA_RECAP      = 8;    // secondi schermata griglia
 const DURATA_PARTENZA   = 4;    // secondi semaforo (4 luci, 1 per secondo)
-const DNF_TIMEOUT       = 30;   // secondi dopo il 1° classificato prima del DNF globale
-const GIRI_GARA         = 3;
+const DNF_TIMEOUT       = 60;   // secondi per tagliare il traguardo dopo il primo arrivo
+const DURATA_AVVISO_PODIO = 3;
+const DURATA_PODIO = 10;
 
-// ── Scia (punto 6) ────────────────────────────────────────────────────────────
 const SCIA_BONUS      = 1.15;  // +15% vel max quando si è in scia
 const SCIA_DIST_MAX   = 180;   // px: distanza massima per la scia
 const SCIA_CONE_BASE  = 18;    // px: apertura base del cono posteriore
 const SCIA_CONE_GAIN  = 0.35;  // px laterali per px di distanza (cono allargato)
 
-const COLORI_AUTO = ['#e74c3c','#3498db','#2ecc71','#f39c12','#9b59b6','#1abc9c','#e67e22','#e91e63'];
+const COLORI_AUTO = ['#e74c3c','#3498db','#b7d29b','#f39c12','#9b59b6','#1abc9c','#e67e22','#e91e63'];
 
 
-// ═══════════════════════════════════════════════════════════════════════════════
 //  TIPI CONDIVISI  (server ↔ client via JSON)
-// ═══════════════════════════════════════════════════════════════════════════════
 
 type Fase = 'qualifiche' | 'recap' | 'gara';
 
 interface StatoAuto {
     x: number; y: number;
+    xPrecedente: number; yPrecedente: number;
     a: number; vx: number; vy: number;
     // Gara
     giri: number;
@@ -188,9 +212,35 @@ interface ChiazzaOlio { x: number; y: number; vita: number; }
 
 interface MsgInput {
     kind: 'input';
-    su: boolean; giu: boolean; sx: boolean; dx: boolean;
+    su: boolean; giu: boolean;
     turbo: boolean; olio: boolean;
     mouseAngolo: number;
+}
+
+function inputNeutro(): MsgInput {
+    return {
+        kind: 'input',
+        su: false, giu: false,
+        turbo: false, olio: false,
+        mouseAngolo: Number.NaN,
+    };
+}
+
+function normalizzaInput(payload: unknown): MsgInput | null {
+    const p = payload as Partial<MsgInput> | null;
+    if (!p || p.kind !== 'input') return null;
+    const mouseAngolo = typeof p.mouseAngolo === 'number' && Number.isFinite(p.mouseAngolo)
+        ? p.mouseAngolo
+        : Number.NaN;
+
+    return {
+        kind: 'input',
+        su: p.su === true,
+        giu: p.giu === true,
+        turbo: p.turbo === true,
+        olio: p.olio === true,
+        mouseAngolo,
+    };
 }
 
 interface MsgStato {
@@ -208,9 +258,7 @@ interface MsgStato {
 }
 
 
-// ═══════════════════════════════════════════════════════════════════════════════
 //  FUNZIONI DI UTILITÀ
-// ═══════════════════════════════════════════════════════════════════════════════
 
 /** Distanza minima dal punto P al segmento A→B */
 function distSegmento(px: number, py: number,
@@ -220,6 +268,21 @@ function distSegmento(px: number, py: number,
     if (len2 === 0) return Math.hypot(px - ax, py - ay);
     const t = Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / len2));
     return Math.hypot(px - (ax + t * dx), py - (ay + t * dy));
+}
+
+/** Restituisce un array con le distanze cumulative dei segmenti, serve per il calcolo della posizione lungo il percorso */
+function distanzeCumulative(lunghezze: number[]): number[] {
+    let totale = 0;
+    return lunghezze.map(len => {
+        const inizioSegmento = totale;
+        totale += len;
+        return inizioSegmento;
+    });
+}
+
+function dentroTraguardo(x: number, y: number): boolean {
+    return Math.abs(x - TRAGUARDO.x) <= TRAGUARDO_LARGHEZZA / 2
+        && Math.abs(y - TRAGUARDO.y) <= TRAGUARDO_ALTEZZA / 2;
 }
 
 /** true se il punto (cx, cy) è sull'asfalto */
@@ -232,6 +295,7 @@ function sullaStrada(cx: number, cy: number): boolean {
     return false;
 }
 
+
 function sullaStradaConMargine(cx: number, cy: number, extra: number): boolean {
     const limite = LARGHEZZA_PISTA / 2 + extra;
     for (let i = 0; i < WAYPOINTS.length; i++) {
@@ -242,13 +306,112 @@ function sullaStradaConMargine(cx: number, cy: number, extra: number): boolean {
     return false;
 }
 
-/** Ordina gli id per miglior tempo di qualifica (senza tempo → in fondo) */
+function orientazione(ax: number, ay: number, bx: number, by: number, cx: number, cy: number): number {
+    return (bx - ax) * (cy - ay) - (by - ay) * (cx - ax);
+}
+
+function puntoSuSegmento(ax: number, ay: number, bx: number, by: number, px: number, py: number): boolean {
+    return px >= Math.min(ax, bx) && px <= Math.max(ax, bx)
+        && py >= Math.min(ay, by) && py <= Math.max(ay, by)
+        && orientazione(ax, ay, bx, by, px, py) === 0;
+}
+
+function segmentiSiIntersecano(
+    ax: number, ay: number, bx: number, by: number,
+    cx: number, cy: number, dx: number, dy: number,
+): boolean {
+    const o1 = orientazione(ax, ay, bx, by, cx, cy);
+    const o2 = orientazione(ax, ay, bx, by, dx, dy);
+    const o3 = orientazione(cx, cy, dx, dy, ax, ay);
+    const o4 = orientazione(cx, cy, dx, dy, bx, by);
+
+    if (o1 === 0 && puntoSuSegmento(ax, ay, bx, by, cx, cy)) return true;
+    if (o2 === 0 && puntoSuSegmento(ax, ay, bx, by, dx, dy)) return true;
+    if (o3 === 0 && puntoSuSegmento(cx, cy, dx, dy, ax, ay)) return true;
+    if (o4 === 0 && puntoSuSegmento(cx, cy, dx, dy, bx, by)) return true;
+
+    return (o1 > 0) !== (o2 > 0) && (o3 > 0) !== (o4 > 0);
+}
+
+function attraversaTraguardo(
+    xPrecedente: number,
+    yPrecedente: number,
+    xAttuale: number,
+    yAttuale: number,
+): boolean {
+    const left = TRAGUARDO.x - TRAGUARDO_LARGHEZZA / 2;
+    const right = TRAGUARDO.x + TRAGUARDO_LARGHEZZA / 2;
+    const top = TRAGUARDO.y - TRAGUARDO_ALTEZZA / 2;
+    const bottom = TRAGUARDO.y + TRAGUARDO_ALTEZZA / 2;
+
+    if (Math.max(xPrecedente, xAttuale) < left || Math.min(xPrecedente, xAttuale) > right) return false;
+    if (Math.max(yPrecedente, yAttuale) < top || Math.min(yPrecedente, yAttuale) > bottom) return false;
+
+    if (dentroTraguardo(xPrecedente, yPrecedente) || dentroTraguardo(xAttuale, yAttuale)) return true;
+
+    return segmentiSiIntersecano(
+        xPrecedente, yPrecedente, xAttuale, yAttuale,
+        left, top, right, top,
+    ) || segmentiSiIntersecano(
+        xPrecedente, yPrecedente, xAttuale, yAttuale,
+        right, top, right, bottom,
+    ) || segmentiSiIntersecano(
+        xPrecedente, yPrecedente, xAttuale, yAttuale,
+        right, bottom, left, bottom,
+    ) || segmentiSiIntersecano(
+        xPrecedente, yPrecedente, xAttuale, yAttuale,
+        left, bottom, left, top,
+    );
+}
+
+function proiettaSuTracciato(px: number, py: number): number {
+    let bestDist = Infinity;
+    let bestProgress = 0;
+
+    for (let i = 0; i < WAYPOINTS.length; i++) {
+        const a = WAYPOINTS[i];
+        const b = WAYPOINTS[(i + 1) % WAYPOINTS.length];
+        const dx = b.x - a.x, dy = b.y - a.y;
+        const len2 = dx * dx + dy * dy;
+        const t = len2 === 0
+            ? 0
+            : Math.max(0, Math.min(1, ((px - a.x) * dx + (py - a.y) * dy) / len2));
+        const sx = a.x + t * dx;
+        const sy = a.y + t * dy;
+        const dist = Math.hypot(px - sx, py - sy);
+
+        if (dist < bestDist) {
+            bestDist = dist;
+            bestProgress = DISTANZE_WAYPOINT[i] + LUNGHEZZE_SEGMENTI[i] * t;
+            if (bestProgress >= LUNGHEZZA_TRACCIATO) bestProgress -= LUNGHEZZA_TRACCIATO;
+        }
+    }
+
+    return bestProgress;
+}
+
+function aggiornaCheckpoint(mask: number, x: number, y: number): number {
+    let prossimoMask = mask;
+    for (let i = 0; i < CHECKPOINTS.length; i++) {
+        const bit = 1 << i;
+        if (prossimoMask & bit) continue;
+        if (i > 0 && !(prossimoMask & (1 << (i - 1)))) continue;
+        if (Math.hypot(x - CHECKPOINTS[i].x, y - CHECKPOINTS[i].y) < CHECKPOINTS[i].r)
+            prossimoMask |= bit;
+    }
+    return prossimoMask;
+}
+
+function tempoQualifica(auto: StatoAuto): number {
+    return auto.migliorGiro < 0 ? Infinity : auto.migliorGiro;
+}
+
+function confrontaQualifica(a: StatoAuto, b: StatoAuto): number {
+    return tempoQualifica(a) - tempoQualifica(b);
+}
+
 function calcolaGriglia(auto: Record<string, StatoAuto>): string[] {
-    return Object.keys(auto).sort((a, b) => {
-        const ta = auto[a].migliorGiro < 0 ? Infinity : auto[a].migliorGiro;
-        const tb = auto[b].migliorGiro < 0 ? Infinity : auto[b].migliorGiro;
-        return ta - tb;
-    });
+    return Object.keys(auto).sort((a, b) => confrontaQualifica(auto[a], auto[b]));
 }
 
 /** Miglior tempo assoluto tra tutti i giocatori (-1 se nessuno ha girato) */
@@ -259,6 +422,20 @@ function calcolaMigliorAssoluto(auto: Record<string, StatoAuto>): number {
         if (t >= 0 && t < best) best = t;
     }
     return best === Infinity ? -1 : best;
+}
+
+const DISTANZA_TRAGUARDO = proiettaSuTracciato(TRAGUARDO.x, TRAGUARDO.y);
+
+function progressoLungoGiro(auto: StatoAuto): number {
+    return proiettaSuTracciato(auto.x, auto.y);
+}
+
+function progressoGara(auto: StatoAuto): number {
+    return auto.giri * LUNGHEZZA_TRACCIATO + progressoLungoGiro(auto);
+}
+
+function confrontaAutoInGara(a: StatoAuto, b: StatoAuto): number {
+    return progressoGara(b) - progressoGara(a);
 }
 
 /** ms → "m:ss,ddd" (es. 68423 → "1:08,423") */
@@ -285,7 +462,7 @@ function normalizzaAngolo(rad: number): number {
  */
 function aggiornaFisica(
     auto: StatoAuto,
-    input: { su: boolean; giu: boolean; sx: boolean; dx: boolean; mouseAngolo: number },
+    input: { su: boolean; giu: boolean; mouseAngolo: number },
     dt: number,
     bonusScia: number,
     fuoriPista: boolean,
@@ -317,9 +494,6 @@ function aggiornaFisica(
         const diff = normalizzaAngolo(input.mouseAngolo - auto.a);
         const maxTurn = STERZO_RAD * dt * 1.7;
         auto.a += Math.sign(diff) * Math.min(Math.abs(diff), maxTurn);
-    } else {
-        if (input.sx) auto.a -= STERZO_RAD * dt;
-        if (input.dx) auto.a += STERZO_RAD * dt;
     }
 
     const fw = { x: Math.cos(auto.a), y: Math.sin(auto.a) };
@@ -359,7 +533,7 @@ function aggiornaFisica(
         auto.vy -= (auto.vy / v) * f;
     }
 
-    // Clamp velocità massima
+    // Limita velocità massima (modulata da turbo e scia)
     const vAtt = Math.hypot(auto.vx, auto.vy);
     if (vAtt > velMax) {
         auto.vx = (auto.vx / vAtt) * velMax;
@@ -377,14 +551,12 @@ function posGriglia(i: number): { x: number; y: number; a: number } {
     return {
         x: TRAGUARDO.x + lato * GRIGLIA_BASE.dx,
         y: TRAGUARDO.y + 150 + fila * GRIGLIA_BASE.dy, // 150px sotto il traguardo
-        a: -Math.PI / 2,   // punta verso nord
+        a: -Math.PI / 2,   // punta verso nord ()
     };
 }
 
 
-// ═══════════════════════════════════════════════════════════════════════════════
 //  SERVER  —  autoritative, gira su Node.js
-// ═══════════════════════════════════════════════════════════════════════════════
 
 export class MicroRacingServer extends GameServer {
 
@@ -398,15 +570,16 @@ export class MicroRacingServer extends GameServer {
     private gridOrder: string[] = [];
     private garaFinita          = false;
     private totGiocatori        = 0;
+    private ultimiInput: Record<string, MsgInput> = {};
 
-    // ── Lifecycle ─────────────────────────────────────────────────────────────
 
     init(giocatori: Record<string, Player>): void {
         let i = 0;
         for (const id in giocatori) {
             const g = posGriglia(i);
             this.auto[id] = {
-                x: g.x, y: g.y, a: g.a, vx: 0, vy: 0,
+                x: g.x, y: g.y, xPrecedente: g.x, yPrecedente: g.y,
+                a: g.a, vx: 0, vy: 0,
                 giri: 0, cp: 0, cpQual: 0,
                 migliorGiro: -1, tempoGiroAttuale: 0,
                 sulTraguardo: false,   // edge-detection: falso all'avvio
@@ -416,6 +589,7 @@ export class MicroRacingServer extends GameServer {
                 nome: giocatori[id].name, character: giocatori[id].character,
                 finito: false, dnf: false, posizione: 0,
             };
+            this.ultimiInput[id] = inputNeutro();
             i++;
         }
         this.totGiocatori = i;
@@ -425,92 +599,17 @@ export class MicroRacingServer extends GameServer {
         const garaAttiva      = this.fase === 'gara' && this.countdownPartenza <= 0;
         const simulazioneOn   = this.fase === 'qualifiche' || garaAttiva;
 
-        // ── 1. Input giocatori ────────────────────────────────────────────────
-        if (simulazioneOn) {
-            for (const msg of messaggi) {
-                const p = msg.payload as MsgInput;
-                if (p.kind !== 'input') continue;
-                const auto = this.auto[msg.clientId];
-                if (!auto || (garaAttiva && auto.finito)) continue;
+        this.registraInput(messaggi);
+        if (simulazioneOn) this.simulaAuto(dt, garaAttiva);
+        else if (this.fase === 'gara') this.tieniFermeLeAuto();
 
-                // Turbo
-                if (p.turbo && auto.turboTimer <= 0 && auto.turboCooldown <= 0)
-                    auto.turboTimer = TURBO_DURATA;
+        if (garaAttiva) this.risolviCollisioniAuto();
+        if (simulazioneOn) this.aggiornaOlio(dt);
 
-                // Olio: lascia la chiazza dietro l'auto solo in gara
-                if (this.fase === 'gara' && p.olio && auto.olioCooldown <= 0) {
-                    auto.olioCooldown = OLIO_RICARICA;
-                    this.olio.push({
-                        x: auto.x - Math.cos(auto.a) * 25,
-                        y: auto.y - Math.sin(auto.a) * 25,
-                        vita: OLIO_VITA,
-                    });
-                }
-
-                // Fuori pista prima del movimento
-                const fuoriPrima = !sullaStradaConMargine(auto.x, auto.y, MARGINE_QUALI);
-                if (this.fase === 'qualifiche' && fuoriPrima) auto.giroInvalido = true;
-
-                // Scia (solo in gara)
-                const bonusScia = garaAttiva ? this.calcolaBonusScia(msg.clientId) : 1;
-                auto.inScia = bonusScia > 1;
-
-                aggiornaFisica(auto, p, dt, bonusScia, fuoriPrima);
-
-                // Fuori pista dopo il movimento (nel caso sia uscito durante il tick)
-                if (this.fase === 'qualifiche' && !sullaStradaConMargine(auto.x, auto.y, MARGINE_QUALI))
-                    auto.giroInvalido = true;
-            }
-        } else if (this.fase === 'gara') {
-            // Semaforo attivo: auto ferme, nessuna scia
-            for (const id in this.auto) {
-                this.auto[id].vx = 0;
-                this.auto[id].vy = 0;
-                this.auto[id].inScia = false;
-            }
-        }
-
-        // ── 2. Collisioni auto-auto (solo in gara — ghosting in qualifica) ────
-        if (garaAttiva) {
-            const ids = Object.keys(this.auto);
-            for (let i = 0; i < ids.length - 1; i++) {
-                for (let j = i + 1; j < ids.length; j++) {
-                    const a = this.auto[ids[i]], b = this.auto[ids[j]];
-                    const d = Math.hypot(a.x - b.x, a.y - b.y);
-                    if (d < 12 && d > 0) {
-                        const nx = (b.x - a.x) / d, ny = (b.y - a.y) / d;
-                        const ov = (12 - d) / 2;
-                        a.x -= nx * ov; a.y -= ny * ov;
-                        b.x += nx * ov; b.y += ny * ov;
-                        const va = a.vx * nx + a.vy * ny, vb = b.vx * nx + b.vy * ny;
-                        a.vx += (vb - va) * nx * 0.7; a.vy += (vb - va) * ny * 0.7;
-                        b.vx += (va - vb) * nx * 0.7; b.vy += (va - vb) * ny * 0.7;
-                    }
-                }
-            }
-        }
-
-        // ── 3. Chiazze d'olio (invecchiano e fanno slittare) ─────────────────
-        if (simulazioneOn) {
-            this.olio = this.olio.filter(o => (o.vita -= dt) > 0);
-            for (const id in this.auto) {
-                const a = this.auto[id];
-                if (a.spinTimer > 0) continue;
-                for (const o of this.olio) {
-                    if (Math.hypot(a.x - o.x, a.y - o.y) < OLIO_RAGGIO) {
-                        a.spinTimer = OLIO_SPIN;
-                        break;
-                    }
-                }
-            }
-        }
-
-        // ── 4. Logica di fase ─────────────────────────────────────────────────
         if      (this.fase === 'qualifiche') this.tickQualifiche(dt);
         else if (this.fase === 'recap')      this.tickRecap(dt);
         else                                 this.tickGara(dt);
 
-        // ── 5. Broadcast stato ────────────────────────────────────────────────
         const payload: MsgStato = {
             kind: 'stato', fase: this.fase,
             tempoQual: this.tempoQual, tempoRecap: this.tempoRecap,
@@ -524,7 +623,100 @@ export class MicroRacingServer extends GameServer {
 
     isFinished(): boolean { return this.garaFinita; }
 
-    // ── Qualifiche ────────────────────────────────────────────────────────────
+    private registraInput(messaggi: IncomingMsg[]): void {
+        for (const msg of messaggi) {
+            const input = normalizzaInput(msg.payload);
+            if (!input || !this.auto[msg.clientId]) continue;
+            this.ultimiInput[msg.clientId] = input;
+        }
+    }
+
+    private simulaAuto(dt: number, garaAttiva: boolean): void {
+        for (const id in this.auto) {
+            const auto = this.auto[id];
+            const input = this.ultimiInput[id] ?? inputNeutro();
+            if (garaAttiva && auto.finito) continue;
+
+            auto.xPrecedente = auto.x;
+            auto.yPrecedente = auto.y;
+
+            this.usaPowerUp(auto, input);
+
+            const fuoriPrima = !sullaStradaConMargine(auto.x, auto.y, MARGINE_QUALI);
+            if (this.fase === 'qualifiche' && fuoriPrima) auto.giroInvalido = true;
+
+            const bonusScia = garaAttiva ? this.calcolaBonusScia(id) : 1;
+            auto.inScia = bonusScia > 1;
+            aggiornaFisica(auto, input, dt, bonusScia, fuoriPrima);
+
+            if (this.fase === 'qualifiche' && !sullaStradaConMargine(auto.x, auto.y, MARGINE_QUALI))
+                auto.giroInvalido = true;
+        }
+    }
+
+    private usaPowerUp(auto: StatoAuto, input: MsgInput): void {
+        if (input.turbo && auto.turboTimer <= 0 && auto.turboCooldown <= 0)
+            auto.turboTimer = TURBO_DURATA;
+
+        if (this.fase === 'gara' && input.olio && auto.olioCooldown <= 0) {
+            auto.olioCooldown = OLIO_RICARICA;
+            this.olio.push({
+                x: auto.x - Math.cos(auto.a) * 25,
+                y: auto.y - Math.sin(auto.a) * 25,
+                vita: OLIO_VITA,
+            });
+        }
+
+        input.turbo = false;
+        input.olio = false;
+    }
+
+    private tieniFermeLeAuto(): void {
+        for (const id in this.auto) {
+            this.auto[id].vx = 0;
+            this.auto[id].vy = 0;
+            this.auto[id].inScia = false;
+        }
+    }
+
+    private risolviCollisioniAuto(): void {
+        const ids = Object.keys(this.auto);
+        for (let i = 0; i < ids.length - 1; i++) {
+            for (let j = i + 1; j < ids.length; j++) {
+                const a = this.auto[ids[i]], b = this.auto[ids[j]];
+                if (a.finito || b.finito) continue;
+
+                const d = Math.hypot(a.x - b.x, a.y - b.y);
+                if (d >= 12 || d <= 0) continue;
+
+                const nx = (b.x - a.x) / d, ny = (b.y - a.y) / d;
+                const ov = (12 - d) / 2;
+                a.x -= nx * ov; a.y -= ny * ov;
+                b.x += nx * ov; b.y += ny * ov;
+
+                const va = a.vx * nx + a.vy * ny;
+                const vb = b.vx * nx + b.vy * ny;
+                a.vx += (vb - va) * nx * 0.7; a.vy += (vb - va) * ny * 0.7;
+                b.vx += (va - vb) * nx * 0.7; b.vy += (va - vb) * ny * 0.7;
+            }
+        }
+    }
+
+    private aggiornaOlio(dt: number): void {
+        this.olio = this.olio.filter(o => (o.vita -= dt) > 0);
+        for (const id in this.auto) {
+            const auto = this.auto[id];
+            if (auto.spinTimer > 0) continue;
+
+            for (const o of this.olio) {
+                if (Math.hypot(auto.x - o.x, auto.y - o.y) < OLIO_RAGGIO) {
+                    auto.spinTimer = OLIO_SPIN;
+                    break;
+                }
+            }
+        }
+    }
+
 
     private tickQualifiche(dt: number): void {
         this.tempoQual -= dt;
@@ -535,24 +727,17 @@ export class MicroRacingServer extends GameServer {
             // Accumula tempo giro (in millisecondi)
             a.tempoGiroAttuale += dt * 1000;
 
-            // Checkpoint in ordine obbligatorio
-            for (let i = 0; i < CHECKPOINTS.length; i++) {
-                const bit = 1 << i;
-                if (a.cpQual & bit) continue;
-                if (i > 0 && !(a.cpQual & (1 << (i - 1)))) continue;
-                if (Math.hypot(a.x - CHECKPOINTS[i].x, a.y - CHECKPOINTS[i].y) < CHECKPOINTS[i].r)
-                    a.cpQual |= bit;
-            }
+            a.cpQual = aggiornaCheckpoint(a.cpQual, a.x, a.y);
 
-            // Edge-detection traguardo: il giro si conta solo all'INGRESSO nel raggio.
-            // Senza questo, ogni tick in cui l'auto è nel raggio verrebbe contato
+            // Edge-detection traguardo: il giro si conta solo all'INGRESSO nella fascia di arrivo.
+            // Senza questo, ogni tick in cui l'auto è dentro verrebbe contato
             // come un nuovo "passaggio", resettando il cronometro più volte.
-            const nelRaggio = Math.hypot(a.x - TRAGUARDO.x, a.y - TRAGUARDO.y) < TRAGUARDO.r;
-            const tuttiCP   = (1 << CHECKPOINTS.length) - 1;
+            const haAttraversatoTraguardo = attraversaTraguardo(a.xPrecedente, a.yPrecedente, a.x, a.y);
+            const nelTraguardo = dentroTraguardo(a.x, a.y);
 
-            if (nelRaggio && !a.sulTraguardo) {
+            if ((nelTraguardo || haAttraversatoTraguardo) && !a.sulTraguardo) {
                 // L'auto è appena entrata nel raggio del traguardo
-                if ((a.cpQual & tuttiCP) === tuttiCP) {
+                if ((a.cpQual & TUTTI_CHECKPOINT) === TUTTI_CHECKPOINT) {
                     // Giro valido: salva il tempo se non è invalido e se è il migliore
                     if (!a.giroInvalido) {
                         const t = a.tempoGiroAttuale;
@@ -566,7 +751,7 @@ export class MicroRacingServer extends GameServer {
                 a.giroInvalido = false;
             }
 
-            a.sulTraguardo = nelRaggio;
+            a.sulTraguardo = nelTraguardo;
         }
 
         // Fine qualifiche → calcola griglia e passa al recap
@@ -579,7 +764,6 @@ export class MicroRacingServer extends GameServer {
         }
     }
 
-    // ── Recap griglia ─────────────────────────────────────────────────────────
 
     private tickRecap(dt: number): void {
         this.tempoRecap -= dt;
@@ -599,15 +783,15 @@ export class MicroRacingServer extends GameServer {
             const g = posGriglia(i);
             const a = this.auto[id];
             a.x = g.x; a.y = g.y; a.a = g.a;
+            a.xPrecedente = g.x; a.yPrecedente = g.y;
             a.vx = 0; a.vy = 0;
             a.giri = 0; a.cp = 0;
-            a.sulTraguardo = false;  // fondamentale: riparte fuori dal raggio
+            a.sulTraguardo = false;  // fondamentale: riparte fuori dalla fascia di arrivo
             a.finito = false; a.dnf = false; a.posizione = 0;
             a.giroInvalido = false; a.inScia = false;
         });
     }
 
-    // ── Gara ──────────────────────────────────────────────────────────────────
 
     private tickGara(dt: number): void {
         // Semaforo: decrementa il countdown; input bloccati nel tick() sopra
@@ -617,39 +801,50 @@ export class MicroRacingServer extends GameServer {
         }
 
         let finiti = 0;
+        const candidati: { auto: StatoAuto; haCompletatoGiri: boolean; progress: number }[] = [];
+        let haVincitoreQuestoTick = false;
+
         for (const id in this.auto) {
             const a = this.auto[id];
             if (a.finito) { finiti++; continue; }
 
-            // Checkpoint in ordine obbligatorio
-            for (let i = 0; i < CHECKPOINTS.length; i++) {
-                const bit = 1 << i;
-                if (a.cp & bit) continue;
-                if (i > 0 && !(a.cp & (1 << (i - 1)))) continue;
-                if (Math.hypot(a.x - CHECKPOINTS[i].x, a.y - CHECKPOINTS[i].y) < CHECKPOINTS[i].r)
-                    a.cp |= bit;
-            }
+            a.cp = aggiornaCheckpoint(a.cp, a.x, a.y);
 
-            // Edge-detection traguardo anche in gara
-            const nelRaggio = Math.hypot(a.x - TRAGUARDO.x, a.y - TRAGUARDO.y) < TRAGUARDO.r;
-            const tuttiCP   = (1 << CHECKPOINTS.length) - 1;
+            const haAttraversatoTraguardo = attraversaTraguardo(a.xPrecedente, a.yPrecedente, a.x, a.y);
+            const nelTraguardo = dentroTraguardo(a.x, a.y);
 
-            if (nelRaggio && !a.sulTraguardo) {
-                if ((a.cp & tuttiCP) === tuttiCP) {
+            if ((nelTraguardo || haAttraversatoTraguardo) && !a.sulTraguardo) {
+                if ((a.cp & TUTTI_CHECKPOINT) === TUTTI_CHECKPOINT) {
                     a.giri++;
                     a.cp = 0;
-                    if (a.giri >= GIRI_GARA) {
-                        a.finito    = true;
-                        a.posizione = ++finiti;
-                        // Primo classificato: avvia il conto alla rovescia DNF
-                        if (finiti === 1) this.dnfTimer = DNF_TIMEOUT;
-                    }
-                } else {
+
+                    const haCompletatoGiri = a.giri >= GIRI_GARA;
+                    candidati.push({
+                        auto: a,
+                        haCompletatoGiri,
+                        progress: progressoGara(a),
+                    });
+                    if (haCompletatoGiri) haVincitoreQuestoTick = true;
+                } else if (this.fase === 'qualifiche') {
                     a.cp = 0;
                 }
             }
 
-            a.sulTraguardo = nelRaggio;
+            a.sulTraguardo = nelTraguardo;
+        }
+
+        const finitiPrima = finiti;
+        const dnfAttivoOra = this.dnfTimer > 0 || (finitiPrima === 0 && haVincitoreQuestoTick);
+        const nuoviFiniti = candidati.filter(c => c.haCompletatoGiri || dnfAttivoOra);
+
+        if (nuoviFiniti.length > 0) {
+            nuoviFiniti.sort((a, b) => b.progress - a.progress);
+            for (const f of nuoviFiniti) {
+                f.auto.finito = true;
+                f.auto.posizione = ++finiti;
+            }
+            if (this.dnfTimer < 0 && finitiPrima === 0 && haVincitoreQuestoTick)
+                this.dnfTimer = DNF_TIMEOUT;
         }
 
         // Tutti hanno finito → gara conclusa
@@ -662,13 +857,14 @@ export class MicroRacingServer extends GameServer {
         if (this.dnfTimer >= 0) {
             this.dnfTimer = Math.max(0, this.dnfTimer - dt);
             if (this.dnfTimer === 0) {
-                for (const id in this.auto) {
+                const nonFiniti = Object.keys(this.auto)
+                    .filter(id => !this.auto[id].finito)
+                    .sort((a, b) => confrontaAutoInGara(this.auto[a], this.auto[b]));
+                for (const id of nonFiniti) {
                     const a = this.auto[id];
-                    if (!a.finito) {
-                        a.finito    = true;
-                        a.dnf       = true;
-                        a.posizione = ++finiti;
-                    }
+                    a.finito    = true;
+                    a.dnf       = true;
+                    a.posizione = ++finiti;
                 }
                 this.garaFinita = true;
                 this.dnfTimer = -1;
@@ -717,9 +913,7 @@ export class MicroRacingServer extends GameServer {
 }
 
 
-// ═══════════════════════════════════════════════════════════════════════════════
 //  CLIENT  —  gira nel browser, solo rendering e invio input
-// ═══════════════════════════════════════════════════════════════════════════════
 
 export class MicroRacingClient extends GameClient {
 
@@ -745,11 +939,15 @@ export class MicroRacingClient extends GameClient {
     private readonly ZOOM = 1.65;
 
     private trackCanvas: HTMLCanvasElement | null = null;
-    private tasti = { su: false, giu: false, sx: false, dx: false, turbo: false, olio: false };
+    private tasti = { su: false, giu: false, turbo: false, olio: false };
     private turboPremuto = false;
     private olioPremuto = false;
+    private mouseSterzoAttivo = false;
     private animTime       = 0;
     private garaFinitaTimer = -1;
+    private wrongWayTimer = 0;
+    private classificaAnim: Record<string, StatoRigaClassifica> = {};
+    private classificaAnimFase: 'qualifiche' | 'gara' | null = null;
 
     // goFlashTimer: dura ~0.9s dopo il GO! per mostrare il testo verde
     private goFlashTimer = 0;
@@ -759,7 +957,6 @@ export class MicroRacingClient extends GameClient {
         this.registraTasti();
     }
 
-    // ── Interfaccia GameClient ────────────────────────────────────────────────
 
     async init(giocatori: Record<string, Player>): Promise<void> {
         let i = 0;
@@ -785,7 +982,8 @@ export class MicroRacingClient extends GameClient {
         if (countdownPrecedente > 0 && this.countdownPartenza <= 0 && this.fase === 'gara')
             this.goFlashTimer = 0.9;
 
-        if (this.garaFinita && this.garaFinitaTimer < 0) this.garaFinitaTimer = 9;
+        if (this.garaFinita && this.garaFinitaTimer < 0)
+            this.garaFinitaTimer = DURATA_AVVISO_PODIO + DURATA_PODIO;
 
         // Prima ricezione: inizializza renderAuto
         if (!this.statoServer) {
@@ -816,7 +1014,6 @@ export class MicroRacingClient extends GameClient {
 
     isFinished(): boolean { return this.garaFinitaTimer === 0; }
 
-    // ── Loop di rendering (~60 fps) ───────────────────────────────────────────
 
     draw(ctx: CanvasRenderingContext2D, dt: number): void {
         if (!this.statoServer) return;
@@ -826,6 +1023,9 @@ export class MicroRacingClient extends GameClient {
 
         const { screenW: W, screenH: H } = this.userInput;
         const me = this.statoServer[this.myId];
+
+        if (me) this.aggiornaContromano(me, dt);
+        else this.wrongWayTimer = 0;
 
         this.interpolaRenderAuto(dt);
 
@@ -839,7 +1039,6 @@ export class MicroRacingClient extends GameClient {
             this.camY += (me.y - this.camY) * Math.min(1, dt * 9);
         }
 
-        // ── Sfondo + pista ────────────────────────────────────────────────────
         ctx.fillStyle = '#3a7d44';
         ctx.fillRect(0, 0, W, H);
 
@@ -854,18 +1053,17 @@ export class MicroRacingClient extends GameClient {
 
         ctx.restore();
 
-        // ── UI in coordinate schermo ──────────────────────────────────────────
         if (this.fase === 'recap') {
             this.disegnaRecap(ctx, W, H);
         } else {
             this.disegnaHUD(ctx, me, W, H);
             this.disegnaSemaforo(ctx, W);
-            this.disegnaClassifica(ctx, W);
+            this.disegnaClassifica(ctx, W, dt);
+            if (this.garaFinitaTimer < 0) this.disegnaAvvisoContromano(ctx, W, H);
             if (this.garaFinitaTimer >= 0) this.disegnaFinale(ctx, me, W, H);
         }
     }
 
-    // ── Interpolazione anti-scatto ────────────────────────────────────────────
 
     /**
      * Avvicina renderAuto verso statoServer ogni frame.
@@ -892,6 +1090,7 @@ export class MicroRacingClient extends GameClient {
 
             // Campi gameplay: sempre autorevoli
             c.vx = t.vx; c.vy = t.vy;
+            c.xPrecedente = t.xPrecedente; c.yPrecedente = t.yPrecedente;
             c.giri = t.giri; c.cp = t.cp; c.cpQual = t.cpQual;
             c.turboTimer = t.turboTimer; c.turboCooldown = t.turboCooldown;
             c.olioCooldown = t.olioCooldown; c.spinTimer = t.spinTimer;
@@ -905,9 +1104,75 @@ export class MicroRacingClient extends GameClient {
         }
     }
 
+    /**
+     * Anima la classifica facendo scorrere i riquadri verso la nuova posizione.
+     * Quando cambia l'ordine, il box si muove invece di saltare di colpo.
+     */
+    private aggiornaClassificaAnimata(voci: [string, StatoAuto][], dt: number): RigaClassificaAnimata[] {
+        const faseClassifica = this.fase === 'qualifiche' ? 'qualifiche' : 'gara';
+        if (this.classificaAnimFase !== faseClassifica) {
+            this.classificaAnimFase = faseClassifica;
+            this.classificaAnim = {};
+        }
+
+        const rowH = 24;
+        const pad = 8;
+        const smoothing = Math.min(1, dt * 12);
+        const present = new Set<string>();
+        const animati: RigaClassificaAnimata[] = [];
+
+        voci.forEach(([id, auto], index) => {
+            const targetY = 10 + rowH * (index + 1) + pad;
+            const bestGiroAttuale = auto.migliorGiro;
+            let stato = this.classificaAnim[id];
+
+            if (!stato) {
+                stato = {
+                    y: targetY,
+                    targetY,
+                    lastIndex: index,
+                    lastBestGiro: bestGiroAttuale,
+                    flash: 0,
+                };
+            }
+
+            const delta = stato.lastIndex - index;
+            const migliorato = faseClassifica === 'qualifiche'
+                && bestGiroAttuale > 0
+                && (stato.lastBestGiro < 0 || bestGiroAttuale < stato.lastBestGiro - 1);
+
+            if (delta !== 0 || migliorato) stato.flash = 1;
+
+            stato.targetY = targetY;
+            stato.y += (stato.targetY - stato.y) * smoothing;
+            stato.flash = Math.max(0, stato.flash - dt * 2.1);
+            stato.lastIndex = index;
+            stato.lastBestGiro = bestGiroAttuale;
+
+            this.classificaAnim[id] = stato;
+            present.add(id);
+            animati.push({
+                id,
+                auto,
+                index,
+                y: stato.y,
+                delta,
+                flash: stato.flash,
+                improved: migliorato,
+            });
+        });
+
+        for (const id in this.classificaAnim) {
+            if (!present.has(id)) delete this.classificaAnim[id];
+        }
+
+        return animati.sort((a, b) => a.y - b.y || a.index - b.index);
+    }
+
     private calcolaAngoloMouse(): number {
         const me = this.statoServer?.[this.myId];
-        if (!me || this.userInput.screenW <= 0 || this.userInput.screenH <= 0) return Number.NaN;
+        if (!me || !this.mouseSterzoAttivo || this.userInput.screenW <= 0 || this.userInput.screenH <= 0)
+            return Number.NaN;
 
         const mouseWorldX = this.camX + (this.userInput.mouseX - this.userInput.screenW / 2) / this.ZOOM;
         const mouseWorldY = this.camY + (this.userInput.mouseY - this.userInput.screenH / 2) / this.ZOOM;
@@ -918,12 +1183,57 @@ export class MicroRacingClient extends GameClient {
         return Math.atan2(dy, dx);
     }
 
-    // ── Disegno auto ──────────────────────────────────────────────────────────
+    private deltaProgressoLungoGiro(x: number, y: number, px: number, py: number): number {
+        const now = proiettaSuTracciato(x, y);
+        const prev = proiettaSuTracciato(px, py);
+        let delta = now - prev;
+        const half = LUNGHEZZA_TRACCIATO / 2;
+        if (delta > half) delta -= LUNGHEZZA_TRACCIATO;
+        else if (delta < -half) delta += LUNGHEZZA_TRACCIATO;
+        return delta;
+    }
+
+    private isContromano(me: StatoAuto): boolean {
+        const dx = me.x - me.xPrecedente;
+        const dy = me.y - me.yPrecedente;
+        const dist = Math.hypot(dx, dy);
+        if (dist < 3) return false;
+        const delta = this.deltaProgressoLungoGiro(me.x, me.y, me.xPrecedente, me.yPrecedente);
+        return delta < -4;
+    }
+
+    private aggiornaContromano(me: StatoAuto, dt: number): void {
+        if (this.fase === 'recap') {
+            this.wrongWayTimer = 0;
+            return;
+        }
+        const contromano = this.isContromano(me);
+        this.wrongWayTimer = contromano
+            ? Math.min(1, this.wrongWayTimer + dt * 2)
+            : Math.max(0, this.wrongWayTimer - dt * 1.4);
+    }
+
+    private disegnaAvvisoContromano(ctx: CanvasRenderingContext2D, W: number, H: number): void {
+        if (this.wrongWayTimer <= 0) return;
+        const alpha = Math.min(1, this.wrongWayTimer);
+        const boxW = 300;
+        const boxH = 34;
+        const x = W / 2 - boxW / 2;
+        const y = H - 110;
+        ctx.fillStyle = `rgba(0,0,0,${0.55 * alpha})`;
+        ctx.fillRect(x, y, boxW, boxH);
+        ctx.textAlign = 'center';
+        ctx.font = 'bold 18px Arial';
+        ctx.fillStyle = `rgba(255,80,80,${alpha})`;
+        ctx.fillText('CONTROMANO', W / 2, y + 23);
+    }
+
 
     private disegnaAuto(ctx: CanvasRenderingContext2D, id: string, auto: StatoAuto): void {
         const colore = this.colori[id] ?? '#fff';
         const sonoIo = id === this.myId;
-        const CW = 8, CH = 14;
+        // hw = half-width, hh = half-height (nel sistema ruotato: hh negativo = muso)
+        const hw = 5, hh = 10;
 
         ctx.save();
 
@@ -931,35 +1241,103 @@ export class MicroRacingClient extends GameClient {
         if (this.fase === 'qualifiche' && !sonoIo) ctx.globalAlpha = 0.45;
 
         ctx.translate(auto.x, auto.y);
-        ctx.rotate(auto.a - Math.PI / 2); // 0 rad = verso destra; l'auto punta su → -90°
+        ctx.rotate(auto.a + Math.PI / 2);
 
-        // Ombra
-        ctx.fillStyle = 'rgba(0,0,0,0.22)';
-        ctx.fillRect(-CW / 2 + 1, -CH / 2 + 2, CW, CH);
+        // --- OMBRA ---
+        ctx.fillStyle = 'rgba(0,0,0,0.25)';
+        ctx.beginPath();
+        ctx.ellipse(1.5, 2, hw + 2, hh, 0, 0, Math.PI * 2);
+        ctx.fill();
 
-        // Corpo
-        ctx.fillStyle   = auto.finito ? '#888' : colore;
-        ctx.strokeStyle = sonoIo ? '#fff' : 'rgba(0,0,0,0.4)';
-        ctx.lineWidth   = sonoIo ? 1.5 : 0.8;
-        ctx.beginPath(); ctx.roundRect(-CW / 2, -CH / 2, CW, CH, 2); ctx.fill(); ctx.stroke();
+        // --- PNEUMATICI (4 rettangoli scuri che sbordano lateralmente) ---
+        const tW = 3.5, tH = 4;
+        ctx.fillStyle = '#111';
+        ctx.beginPath(); ctx.roundRect(-hw - tW + 0.5, -hh + 2,      tW, tH, 1); ctx.fill(); // ant sx
+        ctx.beginPath(); ctx.roundRect( hw - 0.5,       -hh + 2,      tW, tH, 1); ctx.fill(); // ant dx
+        ctx.beginPath(); ctx.roundRect(-hw - tW + 0.5,  hh - 2 - tH, tW, tH, 1); ctx.fill(); // post sx
+        ctx.beginPath(); ctx.roundRect( hw - 0.5,        hh - 2 - tH, tW, tH, 1); ctx.fill(); // post dx
+        // cerchio ruota (cerchione)
+        ctx.fillStyle = 'rgba(255,255,255,0.22)';
+        for (const [tx, ty] of [
+            [-hw - tW/2 + 0.5, -hh + 2 + tH/2],
+            [ hw + tW/2 - 0.5, -hh + 2 + tH/2],
+            [-hw - tW/2 + 0.5,  hh - 2 - tH/2],
+            [ hw + tW/2 - 0.5,  hh - 2 - tH/2],
+        ] as [number,number][]) {
+            ctx.beginPath(); ctx.arc(tx, ty, 1.3, 0, Math.PI * 2); ctx.fill();
+        }
 
-        // Parabrezza
-        ctx.fillStyle = 'rgba(180,230,255,0.7)';
-        ctx.beginPath(); ctx.roundRect(-CW / 2 + 1.5, -CH / 2 + 2, CW - 3, CH * 0.3, 1.5); ctx.fill();
+        // --- ALA ANTERIORE (sottile barra larga, colorata al centro) ---
+        ctx.fillStyle = auto.finito ? '#555' : '#111';
+        ctx.beginPath(); ctx.roundRect(-hw - 5, -hh - 2, (hw + 5) * 2, 2.5, 1); ctx.fill();
+        ctx.fillStyle = auto.finito ? '#777' : colore;
+        ctx.fillRect(-3, -hh - 2, 6, 2.5);
 
-        // Fiamma turbo con flickering
+        // --- CORPO PRINCIPALE a ogiva ---
+        ctx.fillStyle = auto.finito ? '#888' : colore;
+        ctx.beginPath();
+        ctx.moveTo(0,       -hh);       // punta muso
+        ctx.lineTo( hw*0.55, -hh + 3.5); // spalla ant dx
+        ctx.lineTo( hw,      -hh + 6);   // fianco ant dx
+        ctx.lineTo( hw,       hh - 5);   // fianco post dx
+        ctx.lineTo( hw*0.75,  hh);       // coda dx
+        ctx.lineTo(-hw*0.75,  hh);       // coda sx
+        ctx.lineTo(-hw,       hh - 5);   // fianco post sx
+        ctx.lineTo(-hw,      -hh + 6);   // fianco ant sx
+        ctx.lineTo(-hw*0.55, -hh + 3.5); // spalla ant sx
+        ctx.closePath();
+        ctx.fill();
+
+        // bordo corpo
+        ctx.strokeStyle = sonoIo ? '#fff' : 'rgba(0,0,0,0.45)';
+        ctx.lineWidth   = sonoIo ? 1.2 : 0.7;
+        ctx.stroke();
+
+        // --- STRISCIA CENTRALE (livrea) ---
+        ctx.fillStyle = 'rgba(255,255,255,0.18)';
+        ctx.beginPath();
+        ctx.moveTo(0, -hh + 1);
+        ctx.lineTo(1.5, -hh + 6);
+        ctx.lineTo(1.5, hh - 2);
+        ctx.lineTo(-1.5, hh - 2);
+        ctx.lineTo(-1.5, -hh + 6);
+        ctx.closePath();
+        ctx.fill();
+
+        // --- SIDEPODS (riflesso chiaro sui fianchi) ---
+        ctx.fillStyle = 'rgba(255,255,255,0.10)';
+        ctx.beginPath(); ctx.ellipse(-hw * 0.72, 1, 1.5, 4.5, 0, 0, Math.PI * 2); ctx.fill();
+        ctx.beginPath(); ctx.ellipse( hw * 0.72, 1, 1.5, 4.5, 0, 0, Math.PI * 2); ctx.fill();
+
+        // --- COCKPIT / HALO (zona scura) ---
+        ctx.fillStyle = 'rgba(0,0,0,0.60)';
+        ctx.beginPath(); ctx.ellipse(0, -1.5, 2.8, 4.5, 0, 0, Math.PI * 2); ctx.fill();
+
+        // --- CASCO PILOTA ---
+        ctx.fillStyle = sonoIo ? '#f1c40f' : '#ddd';
+        ctx.beginPath(); ctx.arc(0, -2, 1.9, 0, Math.PI * 2); ctx.fill();
+        ctx.fillStyle = 'rgba(120,200,255,0.55)';
+        ctx.beginPath(); ctx.ellipse(0, -3.2, 1.3, 0.8, 0, 0, Math.PI * 2); ctx.fill(); // visiera
+
+        // --- ALA POSTERIORE ---
+        ctx.fillStyle = auto.finito ? '#555' : '#111';
+        ctx.beginPath(); ctx.roundRect(-hw - 3.5, hh + 1, (hw + 3.5) * 2, 2.5, 1); ctx.fill();
+        ctx.fillStyle = auto.finito ? '#777' : colore;
+        ctx.fillRect(-2.5, hh + 1, 5, 2.5);
+
+        // --- FIAMMA TURBO con flickering ---
         if (auto.turboTimer > 0) {
             const len = 5 + Math.sin(this.animTime * 25) * 2;
             ctx.fillStyle = '#ff7700'; ctx.shadowColor = '#ffaa00'; ctx.shadowBlur = 6;
             ctx.beginPath();
-            ctx.moveTo(-2.5, CH / 2); ctx.lineTo(0, CH / 2 + len); ctx.lineTo(2.5, CH / 2);
+            ctx.moveTo(-2.5, hh + 4); ctx.lineTo(0, hh + 4 + len); ctx.lineTo(2.5, hh + 4);
             ctx.closePath(); ctx.fill(); ctx.shadowBlur = 0;
         }
 
-        // Cerchio giallo durante lo spin-out
+        // --- CERCHIO SPIN-OUT ---
         if (auto.spinTimer > 0) {
             ctx.strokeStyle = '#ffff00'; ctx.lineWidth = 1.2; ctx.setLineDash([3, 3]);
-            ctx.beginPath(); ctx.arc(0, 0, CH * 0.8, 0, Math.PI * 2); ctx.stroke();
+            ctx.beginPath(); ctx.arc(0, 0, hh * 1.1, 0, Math.PI * 2); ctx.stroke();
             ctx.setLineDash([]);
         }
 
@@ -970,9 +1348,9 @@ export class MicroRacingClient extends GameClient {
         ctx.font = `bold ${sonoIo ? 8 : 7}px Arial`; ctx.textAlign = 'center';
         if (this.fase === 'qualifiche' && !sonoIo) ctx.globalAlpha = 0.45;
         ctx.fillStyle = 'rgba(0,0,0,0.55)';
-        ctx.fillRect(auto.x - 18, auto.y - CH / 2 - 12, 36, 10);
+        ctx.fillRect(auto.x - 18, auto.y - hh - 12, 36, 10);
         ctx.fillStyle = sonoIo ? '#ffff88' : '#fff';
-        ctx.fillText(auto.nome.substring(0, 8), auto.x, auto.y - CH / 2 - 4);
+        ctx.fillText(auto.nome.substring(0, 8), auto.x, auto.y - hh - 4);
         ctx.restore();
     }
 
@@ -988,7 +1366,6 @@ export class MicroRacingClient extends GameClient {
         ctx.restore();
     }
 
-    // ── HUD ───────────────────────────────────────────────────────────────────
 
     private disegnaHUD(ctx: CanvasRenderingContext2D, me: StatoAuto | undefined, W: number, H: number): void {
         if (!me) return;
@@ -1136,7 +1513,6 @@ export class MicroRacingClient extends GameClient {
         ctx.fillText(etichetta, x, y + h + 11);
     }
 
-    // ── Semaforo di partenza (punto 3) ────────────────────────────────────────
 
     /**
      * Disegna 4 luci rosse che si accendono una per secondo (simulando il semaforo F1),
@@ -1192,18 +1568,13 @@ export class MicroRacingClient extends GameClient {
         }
     }
 
-    // ── Classifica ────────────────────────────────────────────────────────────
 
-    private disegnaClassifica(ctx: CanvasRenderingContext2D, W: number): void {
+    private disegnaClassifica(ctx: CanvasRenderingContext2D, W: number, dt: number): void {
         if (!this.statoServer) return;
 
         let voci: [string, StatoAuto][];
         if (this.fase === 'qualifiche') {
-            voci = Object.entries(this.statoServer).sort((a, b) => {
-                const ta = a[1].migliorGiro < 0 ? Infinity : a[1].migliorGiro;
-                const tb = b[1].migliorGiro < 0 ? Infinity : b[1].migliorGiro;
-                return ta - tb;
-            });
+            voci = Object.entries(this.statoServer).sort((a, b) => confrontaQualifica(a[1], b[1]));
         } else {
             // In gara: chi ha finito prima, poi chi è ancora in pista per giri
             const finiti = Object.entries(this.statoServer)
@@ -1214,7 +1585,7 @@ export class MicroRacingClient extends GameClient {
                 });
             const inGara = Object.entries(this.statoServer)
                 .filter(([, a]) => !a.finito)
-                .sort((a, b) => b[1].giri - a[1].giri);
+                .sort((a, b) => confrontaAutoInGara(a[1], b[1]));
             voci = [...finiti, ...inGara];
         }
 
@@ -1226,40 +1597,90 @@ export class MicroRacingClient extends GameClient {
         ctx.fillText(this.fase === 'qualifiche' ? 'TEMPI QUALIFICHE' : 'CLASSIFICA GARA', lbX + pad, 26);
 
         const tempoLeader = calcolaMigliorAssoluto(this.statoServer);
+        const righe = this.aggiornaClassificaAnimata(voci, dt);
 
-        voci.forEach(([id, auto], i) => {
-            const ry = 10 + rowH * (i + 1) + pad;
+        righe.forEach((riga) => {
+            const { id, auto, index, y, delta, flash, improved } = riga;
+            const sonoIo = id === this.myId;
+            const migliorato = this.fase === 'qualifiche' && improved;
+            const accent = this.fase === 'qualifiche'
+                ? (migliorato ? '#7fff7f' : '#f1c40f')
+                : (delta > 0 ? '#7fff7f' : delta < 0 ? '#ff9b9b' : '#f1c40f');
+
+            const rowX = lbX;
+            const rowY = y - 11;
+
+            ctx.fillStyle = sonoIo
+                ? 'rgba(52,152,219,0.28)'
+                : index % 2 === 0 ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.1)';
+            ctx.fillRect(rowX, rowY, lbW, rowH - 2);
+
+            if (flash > 0) {
+                ctx.fillStyle = this.fase === 'qualifiche'
+                    ? `rgba(127,255,127,${0.25 * flash})`
+                    : delta > 0
+                        ? `rgba(127,255,127,${0.22 * flash})`
+                        : `rgba(255,107,107,${0.18 * flash})`;
+                ctx.fillRect(rowX, rowY, lbW, rowH - 2);
+            }
+
+            if (this.fase === 'qualifiche' && delta !== 0) {
+                ctx.fillStyle = delta > 0 ? 'rgba(127,255,127,0.12)' : 'rgba(255,107,107,0.12)';
+                ctx.fillRect(rowX, rowY, lbW, rowH - 2);
+            }
 
             // Pastiglia colore auto
             ctx.fillStyle = this.colori[id] ?? '#fff';
-            ctx.fillRect(lbX + pad, ry - 11, 9, 12);
+            ctx.fillRect(lbX + pad, y - 11, 9, 12);
 
             // Nome pilota
-            ctx.font = id === this.myId ? 'bold 11px Arial' : '11px Arial';
-            ctx.fillStyle = id === this.myId ? '#ffff88' : '#fff';
+            ctx.font = sonoIo ? 'bold 11px Arial' : '11px Arial';
+            ctx.fillStyle = sonoIo ? '#ffff88' : '#fff';
             ctx.textAlign = 'left';
-            ctx.fillText(`${i + 1}. ${auto.nome.substring(0, 9)}`, lbX + pad + 13, ry);
+            ctx.fillText(`${index + 1}. ${auto.nome.substring(0, 9)}`, lbX + pad + 13, y);
 
             // Tempo / stato
-            ctx.textAlign = 'right'; ctx.font = '10px Arial'; ctx.fillStyle = '#ccc';
+            ctx.textAlign = 'right'; ctx.font = '10px Arial';
             if (this.fase === 'qualifiche') {
-                if (i === 0 && auto.migliorGiro > 0) {
-                    ctx.fillStyle = '#7fff7f';
-                    ctx.fillText(formatTempo(auto.migliorGiro), lbX + lbW - pad, ry);
+                if (migliorato && auto.migliorGiro > 0) {
+                    ctx.fillStyle = accent;
+                    ctx.fillText(formatTempo(auto.migliorGiro), lbX + lbW - pad, y);
                 } else if (auto.migliorGiro > 0 && tempoLeader > 0) {
-                    ctx.fillText(`+${auto.migliorGiro - tempoLeader} ms`, lbX + lbW - pad, ry);
+                    ctx.fillStyle = '#ccc';
+                    ctx.fillText(`+${auto.migliorGiro - tempoLeader} ms`, lbX + lbW - pad, y);
                 } else {
-                    ctx.fillText('--', lbX + lbW - pad, ry);
+                    ctx.fillStyle = '#555';
+                    ctx.fillText('--', lbX + lbW - pad, y);
                 }
             } else {
-                if (auto.dnf)    ctx.fillText('DNF',    lbX + lbW - pad, ry);
-                else if (auto.finito) ctx.fillText('✓ ARR.', lbX + lbW - pad, ry);
-                else ctx.fillText(`G${auto.giri + 1}`, lbX + lbW - pad, ry);
+                if (auto.dnf) {
+                    ctx.fillStyle = '#ff9b9b';
+                    ctx.fillText('DNF', lbX + lbW - pad, y);
+                } else if (auto.finito) {
+                    ctx.fillStyle = '#bbb';
+                    ctx.fillText('✓ ARR.', lbX + lbW - pad, y);
+                } else {
+                    ctx.fillStyle = accent;
+                    ctx.fillText(`G${auto.giri + 1}`, lbX + lbW - pad, y);
+                }
+            }
+
+            if (this.fase === 'gara' && delta !== 0) {
+                ctx.textAlign = 'center';
+                ctx.font = 'bold 10px Arial';
+                ctx.fillStyle = accent;
+                ctx.fillText(delta > 0 ? `▲${Math.abs(delta)}` : `▼${Math.abs(delta)}`, lbX + lbW - 44, y);
+            }
+
+            if (migliorato) {
+                ctx.textAlign = 'center';
+                ctx.font = 'bold 9px Arial';
+                ctx.fillStyle = '#7fff7f';
+                ctx.fillText('PB', lbX + lbW - 44, y - 10);
             }
         });
     }
 
-    // ── Recap griglia ─────────────────────────────────────────────────────────
 
     /**
      * Schermata tra qualifiche e gara.
@@ -1289,7 +1710,7 @@ export class MicroRacingClient extends GameClient {
         ctx.fillStyle = 'rgba(255,255,255,0.12)';
         ctx.fillRect(W / 2 - 190, 168, 380, 1);
 
-        const gridRev     = [...this.gridOrder].reverse();//aura
+        const gridRev     = [...this.gridOrder].reverse();
         const tempoLeader = this.gridOrder.length > 0
             ? (this.statoServer[this.gridOrder[0]]?.migliorGiro ?? -1)
             : -1;
@@ -1306,7 +1727,7 @@ export class MicroRacingClient extends GameClient {
             const sonoIo  = id === this.myId;
             const ry      = startY + idx * rigaH;
 
-            // Sfondo rigaaaaaaaass
+            // Sfondo riga
             ctx.fillStyle = isPole
                 ? 'rgba(200,155,30,0.35)'
                 : sonoIo
@@ -1352,35 +1773,189 @@ export class MicroRacingClient extends GameClient {
         ctx.fillText('Le macchine vengono riposizionate automaticamente', W / 2, startY + rigaH * gridRev.length + 20);
     }
 
-    // ── Schermata fine garaa ───────────────────────────────────────────────────
 
     private disegnaFinale(ctx: CanvasRenderingContext2D, me: StatoAuto | undefined, W: number, H: number): void {
-        ctx.fillStyle = 'rgba(0,0,0,0.75)'; ctx.fillRect(0, 0, W, H);
-        ctx.textAlign = 'center';
-        ctx.font = 'bold 52px Arial'; ctx.fillStyle = '#f1c40f';
-        ctx.fillText('GARA FINITA!', W / 2, H / 2 - 90);
-
-        if (me?.finito) {
-            ctx.font = 'bold 26px Arial'; ctx.fillStyle = '#fff';
-            ctx.fillText(me.dnf ? 'DNF — non hai completato la gara in tempo' : `Hai concluso ${me.posizione}°!`, W / 2, H / 2 - 40);
-        }
-
-        if (this.statoServer) {
-            const classificati = Object.values(this.statoServer)
-                .filter(a => a.finito && !a.dnf)
-                .sort((a, b) => a.posizione - b.posizione)
-                .slice(0, 3);
-            const medals = ['🥇', '🥈', '🥉'];
-            classificati.forEach((a, i) => {
-                ctx.font = `${i === 0 ? 'bold 26px' : '21px'} Arial`; ctx.fillStyle = '#fff';
-                ctx.fillText(`${medals[i] ?? ''} ${a.nome}`, W / 2, H / 2 + 20 + i * 38);
-                const draw = getCharacterDrawFunction(a.character);
-                if (draw) draw(ctx, W / 2 - 80 + i * 80, H / 2 + 10 + i * 38, 14, 40);
-            });
+        if (this.garaFinitaTimer > DURATA_PODIO) {
+            this.disegnaAvvisoPodio(ctx, me, W, H);
+        } else {
+            this.disegnaPodio(ctx, W, H);
         }
     }
 
-    // ── Canvas della pista (costruito una sola volta in init) ─────────────────
+    private disegnaAvvisoPodio(ctx: CanvasRenderingContext2D, me: StatoAuto | undefined, W: number, H: number): void {
+        const secondi = Math.max(1, Math.ceil(this.garaFinitaTimer - DURATA_PODIO));
+
+        ctx.fillStyle = 'rgba(0,0,0,0.78)';
+        ctx.fillRect(0, 0, W, H);
+        ctx.textAlign = 'center';
+        ctx.font = 'bold 54px Arial';
+        ctx.fillStyle = '#f1c40f';
+        ctx.fillText('GARA FINITA!', W / 2, H / 2 - 105);
+
+        if (me?.finito) {
+            ctx.font = 'bold 26px Arial';
+            ctx.fillStyle = '#fff';
+            ctx.fillText(me.dnf ? 'DNF - non hai completato la gara in tempo' : `Hai concluso P${me.posizione}!`, W / 2, H / 2 - 55);
+        }
+
+        ctx.font = 'bold 30px Arial';
+        ctx.fillStyle = '#fff';
+        ctx.fillText('Il podio sta per iniziare', W / 2, H / 2 + 25);
+        ctx.font = 'bold 72px Arial';
+        ctx.fillStyle = '#7ecfff';
+        ctx.fillText(String(secondi), W / 2, H / 2 + 110);
+    }
+
+    private disegnaPodio(ctx: CanvasRenderingContext2D, W: number, H: number): void {
+        const topTre = this.topTreFinale();
+        const tempoRimasto = Math.max(0, Math.ceil(this.garaFinitaTimer));
+
+        ctx.save();
+
+        const bg = ctx.createLinearGradient(0, 0, 0, H);
+        bg.addColorStop(0, '#17181d');
+        bg.addColorStop(0.55, '#0d0f12');
+        bg.addColorStop(1, '#050506');
+        ctx.fillStyle = bg;
+        ctx.fillRect(0, 0, W, H);
+
+        const glowSinistra = ctx.createRadialGradient(W * 0.18, H * 0.16, 0, W * 0.18, H * 0.16, Math.max(W, H) * 0.7);
+        glowSinistra.addColorStop(0, 'rgba(255, 71, 58, 0.22)');
+        glowSinistra.addColorStop(0.55, 'rgba(255, 71, 58, 0.08)');
+        glowSinistra.addColorStop(1, 'rgba(255, 71, 58, 0)');
+        ctx.fillStyle = glowSinistra;
+        ctx.fillRect(0, 0, W, H);
+
+        const glowDestra = ctx.createRadialGradient(W * 0.82, H * 0.18, 0, W * 0.82, H * 0.18, Math.max(W, H) * 0.65);
+        glowDestra.addColorStop(0, 'rgba(241, 196, 15, 0.18)');
+        glowDestra.addColorStop(0.55, 'rgba(241, 196, 15, 0.05)');
+        glowDestra.addColorStop(1, 'rgba(241, 196, 15, 0)');
+        ctx.fillStyle = glowDestra;
+        ctx.fillRect(0, 0, W, H);
+
+        const floorTop = H - 132;
+        const floorGrad = ctx.createLinearGradient(0, floorTop, 0, H);
+        floorGrad.addColorStop(0, 'rgba(255,255,255,0.04)');
+        floorGrad.addColorStop(1, 'rgba(0,0,0,0.32)');
+        ctx.fillStyle = floorGrad;
+        ctx.fillRect(0, floorTop, W, 132);
+        ctx.strokeStyle = 'rgba(255,255,255,0.05)';
+        ctx.lineWidth = 2;
+        for (let x = -40; x < W + 60; x += 120) {
+            ctx.beginPath();
+            ctx.moveTo(x, floorTop + 22);
+            ctx.lineTo(x + 44, H);
+            ctx.stroke();
+        }
+
+        const bannerY = 18;
+        const bannerH = 30;
+        const bannerW = Math.min(W * 0.64, 440);
+        const bannerX = W / 2 - bannerW / 2;
+        const cellsX = 18;
+        const cellW = bannerW / cellsX;
+        const cellH = bannerH / 2;
+        ctx.fillStyle = '#0a0a0a';
+        ctx.fillRect(bannerX - 4, bannerY - 4, bannerW + 8, bannerH + 8);
+        for (let row = 0; row < 2; row++) {
+            for (let col = 0; col < cellsX; col++) {
+                ctx.fillStyle = (row + col) % 2 === 0 ? '#f5f5f5' : '#101010';
+                ctx.fillRect(bannerX + col * cellW, bannerY + row * cellH, cellW + 0.2, cellH + 0.2);
+            }
+        }
+        ctx.fillStyle = 'rgba(255,255,255,0.12)';
+        ctx.fillRect(bannerX, bannerY, bannerW, 2);
+        ctx.fillStyle = 'rgba(255,64,64,0.78)';
+        ctx.fillRect(bannerX, bannerY + bannerH - 3, bannerW, 3);
+
+        ctx.textAlign = 'center';
+        ctx.font = 'bold 46px Arial';
+        ctx.fillStyle = '#f4f1e6';
+        ctx.fillText('PODIO', W / 2, 80);
+        ctx.font = 'bold 16px Arial';
+        ctx.fillStyle = '#ffcf5a';
+        ctx.fillText(`Ritorno alla lobby in ${tempoRimasto}s`, W / 2, 106);
+
+        const baseY = H - 70;
+        const stepW = Math.min(190, W * 0.25);
+        const gap = Math.min(22, W * 0.03);
+        const centerX = W / 2;
+        const layout = [
+            { place: 2, x: centerX - stepW - gap, h: 150, color: '#c0c8d8' },
+            { place: 1, x: centerX,               h: 220, color: '#f1c40f' },
+            { place: 3, x: centerX + stepW + gap, h: 115, color: '#cd7f32' },
+        ];
+
+        for (const slot of layout) {
+            const auto = topTre[slot.place - 1];
+            const stepX = slot.x - stepW / 2;
+            const stepY = baseY - slot.h;
+            const topH = 16;
+
+            ctx.fillStyle = 'rgba(0,0,0,0.35)';
+            ctx.fillRect(stepX + 10, stepY + 12, stepW, slot.h);
+
+            const faceGrad = ctx.createLinearGradient(0, stepY, 0, stepY + slot.h);
+            faceGrad.addColorStop(0, slot.place === 1 ? '#ffd95a' : slot.color);
+            faceGrad.addColorStop(1, slot.place === 1 ? '#7a5f10' : '#4d5058');
+            ctx.fillStyle = faceGrad;
+            ctx.fillRect(stepX, stepY, stepW, slot.h);
+
+            const topGrad = ctx.createLinearGradient(0, stepY, 0, stepY + topH);
+            topGrad.addColorStop(0, '#2b2f37');
+            topGrad.addColorStop(1, '#5e6572');
+            ctx.fillStyle = topGrad;
+            ctx.fillRect(stepX, stepY, stepW, topH);
+
+            ctx.fillStyle = 'rgba(255,255,255,0.16)';
+            ctx.fillRect(stepX, stepY, stepW, 4);
+            ctx.fillStyle = 'rgba(0,0,0,0.2)';
+            ctx.fillRect(stepX, stepY + slot.h - 5, stepW, 5);
+
+            ctx.font = 'bold 54px Arial';
+            ctx.textAlign = 'center';
+            ctx.fillStyle = 'rgba(0,0,0,0.28)';
+            ctx.fillText(String(slot.place), slot.x + 2, stepY + slot.h * 0.48 + 4);
+            ctx.fillStyle = slot.place === 1 ? '#fff7b1' : '#eef1f7';
+            ctx.fillText(String(slot.place), slot.x, stepY + slot.h * 0.48);
+
+            if (!auto) continue;
+
+            const draw = getCharacterDrawFunction(auto.character);
+            if (draw) draw(ctx, slot.x, stepY - 56, 48, 112);
+
+            const nameW = Math.min(170, stepW + 12);
+            const nameH = 24;
+            const nameX = slot.x - nameW / 2;
+            const nameY = stepY - 144;
+            ctx.fillStyle = 'rgba(8,8,10,0.84)';
+            ctx.fillRect(nameX, nameY, nameW, nameH);
+            ctx.strokeStyle = slot.place === 1 ? '#f1c40f' : 'rgba(255,255,255,0.16)';
+            ctx.lineWidth = 1.5;
+            ctx.strokeRect(nameX, nameY, nameW, nameH);
+
+            ctx.font = 'bold 15px Arial';
+            ctx.fillStyle = '#fff';
+            ctx.fillText(auto.nome.substring(0, 16), slot.x, nameY + 17);
+
+            ctx.font = 'bold 13px Arial';
+            ctx.fillStyle = auto.dnf ? '#ff9b9b' : '#dce8ff';
+            ctx.fillText(auto.dnf ? 'DNF' : `P${auto.posizione}`, slot.x, stepY + slot.h - 14);
+        }
+
+        ctx.restore();
+    }
+
+    private topTreFinale(): StatoAuto[] {
+        if (!this.statoServer) return [];
+        return Object.values(this.statoServer)
+            .filter(a => a.finito)
+            .sort((a, b) => {
+                if (a.dnf !== b.dnf) return a.dnf ? 1 : -1;
+                return a.posizione - b.posizione;
+            })
+            .slice(0, 3);
+    }
 
     private costruisciCanvas(): HTMLCanvasElement {
         const oc = document.createElement('canvas');
@@ -1400,6 +1975,8 @@ export class MicroRacingClient extends GameClient {
             c.lineTo(WAYPOINTS[i % WAYPOINTS.length].x, WAYPOINTS[i % WAYPOINTS.length].y);
         c.stroke();
 
+        this.disegnaCordoliEsterni(c);
+
         // Linea tratteggiata centrale
         c.strokeStyle = 'rgba(255,255,255,0.20)'; c.lineWidth = 2; c.setLineDash([18, 14]);
         c.beginPath(); c.moveTo(WAYPOINTS[0].x, WAYPOINTS[0].y);
@@ -1407,21 +1984,65 @@ export class MicroRacingClient extends GameClient {
             c.lineTo(WAYPOINTS[i % WAYPOINTS.length].x, WAYPOINTS[i % WAYPOINTS.length].y);
         c.stroke(); c.setLineDash([]);
 
-        // Cordoli rossi/bianchi ai checkpoint
-        for (const cp of CHECKPOINTS) {
-            for (let j = -4; j <= 4; j++) {
-                c.fillStyle = j % 2 === 0 ? '#cc0000' : '#ffffff';
-                c.fillRect(cp.x - 4 + j * 3, cp.y - cp.r * 0.6, 3, cp.r * 1.2);
+        // Checkpoint visivi: linee tratteggiate trasversali, sottili e fuse con l'asfalto.
+        for (let i = 0; i < CHECKPOINTS.length; i++) {
+            const cp = CHECKPOINTS[i];
+            const wpIndex = CHECKPOINTS_WAYPOINT_INDEX[i];
+            const prev = WAYPOINTS[(wpIndex - 1 + WAYPOINTS.length) % WAYPOINTS.length];
+            const next = WAYPOINTS[(wpIndex + 1) % WAYPOINTS.length];
+            const tx = next.x - prev.x;
+            const ty = next.y - prev.y;
+            const laneAngle = Math.atan2(ty, tx);
+            const lineAngle = laneAngle + Math.PI / 2;
+            const lineLen = LARGHEZZA_PISTA * 0.92;
+            const dashCount = 9;
+            const dashLen = lineLen / (dashCount * 2 - 1);
+
+            c.save();
+            c.translate(cp.x, cp.y);
+            c.rotate(lineAngle);
+
+            c.strokeStyle = 'rgba(255, 255, 255, 0.92)';
+            c.lineWidth = 3;
+            c.lineCap = 'round';
+            for (let d = 0; d < dashCount; d++) {
+                const start = -lineLen / 2 + d * dashLen * 2;
+                c.beginPath();
+                c.moveTo(start, 0);
+                c.lineTo(start + dashLen, 0);
+                c.stroke();
             }
+
+            c.rotate(-lineAngle);
+            c.fillStyle = 'rgba(255,255,255,0.65)';
+            c.font = 'bold 12px sans-serif';
+            c.textAlign = 'center';
+            c.textBaseline = 'middle';
+            c.fillText(String(i + 1), 0, -14);
+            c.restore();
         }
 
-        // Traguardo a scacchi bianchi/neri
+        // Traguardo a scacchi bianchi/neri, centrato sulla linea di arrivo
         const t = TRAGUARDO;
-        for (let row = 0; row < 5; row++)
-            for (let col = 0; col < 10; col++) {
-                c.fillStyle = (row + col) % 2 === 0 ? '#ffffff' : '#000000';
-                c.fillRect(t.x - 25 + col * 5, t.y - 25 + row * 5, 5, 5);
+        const bandW = TRAGUARDO_LARGHEZZA;
+        const bandH = TRAGUARDO_ALTEZZA;
+        const cellsX = 18;
+        const cellW = bandW / cellsX;
+        const cellH = bandH / 2;
+
+        c.fillStyle = '#0a0a0a';
+        c.fillRect(t.x - bandW / 2 - 4, t.y - bandH / 2 - 4, bandW + 8, bandH + 8);
+
+        for (let row = 0; row < 2; row++)
+            for (let col = 0; col < cellsX; col++) {
+                c.fillStyle = (row + col) % 2 === 0 ? '#f5f5f5' : '#101010';
+                c.fillRect(t.x - bandW / 2 + col * cellW, t.y - bandH / 2 + row * cellH, cellW + 0.2, cellH + 0.2);
             }
+
+        c.fillStyle = 'rgba(255,255,255,0.12)';
+        c.fillRect(t.x - bandW / 2, t.y - bandH / 2 - 3, bandW, 2);
+        c.fillStyle = 'rgba(255,64,64,0.8)';
+        c.fillRect(t.x - bandW / 2, t.y + bandH / 2 + 1, bandW, 3);
 
         // Texture asfalto: puntini casuali per varietà visiva
         c.fillStyle = 'rgba(0,0,0,0.07)';
@@ -1431,17 +2052,84 @@ export class MicroRacingClient extends GameClient {
             if (sullaStrada(rx, ry)) c.fillRect(rx, ry, 2, 2);
         }
 
-        // Numeri di curva accanto a ogni checkpoint
-        c.fillStyle = 'rgba(255,255,255,0.35)'; c.font = 'bold 22px Arial'; c.textAlign = 'center';
-        CHECKPOINTS.forEach((cp, i) => c.fillText(String(i + 1), cp.x, cp.y + 8));
-
         return oc;
     }
 
-    // ── Gestione tasti ────────────────────────────────────────────────────────
+    private disegnaCordoliEsterni(c: CanvasRenderingContext2D): void {
+        const raggio = LARGHEZZA_PISTA / 2 + 7;
+        const profondita = 12;
+        const lunghezzaStriscia = 18;
+        const angoloMinimo = 0.22;
+
+        c.save();
+        c.lineWidth = profondita;
+        c.lineCap = 'butt';
+
+        for (let i = 0; i < WAYPOINTS.length; i++) {
+            const prev = WAYPOINTS[(i - 1 + WAYPOINTS.length) % WAYPOINTS.length];
+            const curr = WAYPOINTS[i];
+            const next = WAYPOINTS[(i + 1) % WAYPOINTS.length];
+            const inDir = this.normalizzaPunto({ x: curr.x - prev.x, y: curr.y - prev.y });
+            const outDir = this.normalizzaPunto({ x: next.x - curr.x, y: next.y - curr.y });
+            const cambioDirezione = Math.hypot(outDir.x - inDir.x, outDir.y - inDir.y);
+            if (cambioDirezione < angoloMinimo) continue;
+
+            const latoEsterno = inDir.x * outDir.y - inDir.y * outDir.x >= 0 ? -1 : 1;
+            const normaleIn = this.normaleLaterale(inDir, latoEsterno);
+            const normaleOut = this.normaleLaterale(outDir, latoEsterno);
+            const start = Math.atan2(normaleIn.y, normaleIn.x);
+            const delta = this.deltaAngoloMinimo(start, Math.atan2(normaleOut.y, normaleOut.x));
+            const lunghezzaArco = Math.abs(delta) * raggio;
+            const strisce = Math.max(3, Math.ceil(lunghezzaArco / lunghezzaStriscia));
+
+            for (let s = 0; s < strisce; s++) {
+                const t0 = s / strisce;
+                const t1 = (s + 1) / strisce;
+                c.strokeStyle = s % 2 === 0 ? '#cc0000' : '#ffffff';
+                c.beginPath();
+                c.arc(
+                    curr.x,
+                    curr.y,
+                    raggio,
+                    start + delta * t0,
+                    start + delta * t1,
+                    delta < 0,
+                );
+                c.stroke();
+            }
+        }
+
+        c.restore();
+    }
+
+    private normalizzaPunto(p: Punto): Punto {
+        const len = Math.hypot(p.x, p.y);
+        return len === 0 ? { x: 0, y: 0 } : { x: p.x / len, y: p.y / len };
+    }
+
+    private normaleLaterale(dir: Punto, lato: -1 | 1): Punto {
+        return lato === 1
+            ? { x: -dir.y, y: dir.x }
+            : { x: dir.y, y: -dir.x };
+    }
+
+    private deltaAngoloMinimo(from: number, to: number): number {
+        let delta = to - from;
+        while (delta > Math.PI) delta -= Math.PI * 2;
+        while (delta < -Math.PI) delta += Math.PI * 2;
+        return delta;
+    }
+
 
     private registraTasti(): void {
         const set = (e: KeyboardEvent, v: boolean) => {
+            const isGameKey =
+                e.code === 'KeyW' || e.code === 'ArrowUp' ||
+                e.code === 'KeyS' || e.code === 'ArrowDown' ||
+                e.code === 'Space' ||
+                e.code === 'ShiftLeft' || e.code === 'ShiftRight';
+            if (isGameKey) e.preventDefault();
+
             if (e.code === 'KeyW' || e.code === 'ArrowUp')         this.tasti.su    = v;
             if (e.code === 'KeyS' || e.code === 'ArrowDown')       this.tasti.giu   = v;
             if (e.code === 'Space') {
@@ -1464,5 +2152,6 @@ export class MicroRacingClient extends GameClient {
         };
         document.addEventListener('keydown', e => set(e, true));
         document.addEventListener('keyup',   e => set(e, false));
+        this.userInput.canvas.addEventListener('pointermove', () => { this.mouseSterzoAttivo = true; });
     }
 }
