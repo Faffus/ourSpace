@@ -5,6 +5,7 @@ import { PongClient, PongServer } from "./multi-pong";
 import { BrawlClient , BrawlServer } from "./brawl";
 import { MicroRacingClient, MicroRacingServer } from "./micro-racing";
 import { MinecraftDiamondRushClient, MinecraftDiamondRushServer } from "./minecraft2d";
+import { FighterClient, FighterServer } from "./fighter/fighter";
 
 export type GameInfo = {
     client: new (userInput: UserInput, myId: string) => GameClient;
@@ -41,5 +42,12 @@ export const GAMES: Record<string, GameInfo> = {
         client: MinecraftDiamondRushClient,
         server: MinecraftDiamondRushServer,
         name: 'Minecraft Diamond Rush'
+    },
+    fighter: {
+        client: FighterClient,
+        server: FighterServer,
+        name: 'Fighter',
+        minPlayers: 2,
+        maxPlayers: 2
     }
 }
