@@ -1,167 +1,171 @@
 import {
-    MC2D_CHUNK_SIZE,
-    MC2D_DIAMOND_MAX_Y,
-    MC2D_DIAMOND_MIN_Y,
-    MC2D_ORE_IRON_CHANCE,
-    MC2D_SURFACE_BASE_Y,
-    MC2D_TREE_CHANCE,
-    MC2D_WORLD_MAX_X,
-    MC2D_WORLD_MAX_Y,
-    MC2D_WORLD_MIN_X,
-    MC2D_WORLD_MIN_Y
+	MC2D_CHUNK_SIZE,
+	MC2D_DIAMOND_MAX_Y,
+	MC2D_DIAMOND_MIN_Y,
+	MC2D_ORE_IRON_CHANCE,
+	MC2D_SURFACE_BASE_Y,
+	MC2D_TREE_CHANCE,
+	MC2D_WORLD_MAX_X,
+	MC2D_WORLD_MAX_Y,
+	MC2D_WORLD_MIN_X,
+	MC2D_WORLD_MIN_Y
 } from "./constants";
 import { BlockType, Chunk, TilePos } from "./types";
-import { chunkCoordFromTile, seededNoise } from "./utils";
+import { seededNoise } from "./utils";
 
 const CHUNK_RADIUS_X = 4;
 const CHUNK_RADIUS_Y = 3;
+const CHUNK_AREA     = MC2D_CHUNK_SIZE * MC2D_CHUNK_SIZE;
+
+const KEY_X_OFF = 96;
+const KEY_Y_OFF = 84;
+const KEY_MUL   = 200;
 
 export class MinecraftWorld {
-    seed: number;
-    diamondPos: TilePos;
-    diamondRevealed: boolean;
-    overrides: Map<string, BlockType>;
+	seed:            number;
+	diamondPos:      TilePos;
+	diamondRevealed: boolean;
+	overrides:       Map<number, BlockType>;
 
-    constructor(seed: number) {
-        this.seed = seed;
-        this.diamondPos = this.pickDiamondPos();
-        this.diamondRevealed = false;
-        this.overrides = new Map();
-    }
+	constructor(seed: number) {
+		this.seed            = seed;
+		this.diamondRevealed = false;
+		this.overrides       = new Map();
+		this.diamondPos      = this.pickDiamondPos();
+	}
 
-    getBlock(tileX: number, tileY: number): BlockType {
-        if (tileX < MC2D_WORLD_MIN_X || tileX > MC2D_WORLD_MAX_X) return "stone";
-        if (tileY < MC2D_WORLD_MIN_Y) return "stone";
-        if (tileY > MC2D_WORLD_MAX_Y) return "air";
+	getBlock(tileX: number, tileY: number): BlockType {
+		if (tileX < MC2D_WORLD_MIN_X || tileX > MC2D_WORLD_MAX_X) return "stone";
+		if (tileY < MC2D_WORLD_MIN_Y) return "stone";
+		if (tileY > MC2D_WORLD_MAX_Y) return "air";
 
-        const key = this.tileKey(tileX, tileY);
-        const edited = this.overrides.get(key);
-        if (edited) return edited;
+		const override = this.overrides.get(this.tileKey(tileX, tileY));
+		if (override !== undefined) return override;
 
-        if (tileX === this.diamondPos.x && tileY === this.diamondPos.y) {
-            return "diamond";
-        }
+		if (tileX === this.diamondPos.x && tileY === this.diamondPos.y) return "diamond";
 
-        return this.baseBlockAt(tileX, tileY);
-    }
+		return this.baseBlockAt(tileX, tileY);
+	}
 
-    getBlockForClient(tileX: number, tileY: number): BlockType {
-        return this.getBlock(tileX, tileY);
-    }
+	mineBlock(tileX: number, tileY: number): { block: BlockType; wasDiamond: boolean } | null {
+		if (!this.inBounds(tileX, tileY)) return null;
+		const block = this.getBlock(tileX, tileY);
+		if (block === "air") return null;
 
-    mineBlock(tileX: number, tileY: number): { block: BlockType; wasDiamond: boolean } | null {
-        if (!this.isWithinMutableBounds(tileX, tileY)) return null;
+		const wasDiamond = tileX === this.diamondPos.x && tileY === this.diamondPos.y;
+		this.overrides.set(this.tileKey(tileX, tileY), "air");
+		if (wasDiamond) this.diamondRevealed = true;
 
-        const block = this.getBlock(tileX, tileY);
-        if (block === "air") return null;
+		return { block, wasDiamond };
+	}
 
-        const wasDiamond = tileX === this.diamondPos.x && tileY === this.diamondPos.y;
-        this.overrides.set(this.tileKey(tileX, tileY), "air");
-        if (wasDiamond) this.diamondRevealed = true;
+	placeBlock(tileX: number, tileY: number, block: BlockType): boolean {
+		if (!this.inBounds(tileX, tileY)) return false;
+		if (block === "air" || this.getBlock(tileX, tileY) !== "air") return false;
+		this.overrides.set(this.tileKey(tileX, tileY), block);
+		return true;
+	}
 
-        return { block, wasDiamond };
-    }
+	isSolidAt(tileX: number, tileY: number): boolean {
+		return this.getBlock(tileX, tileY) !== "air";
+	}
 
-    placeBlock(tileX: number, tileY: number, block: BlockType): boolean {
-        if (!this.isWithinMutableBounds(tileX, tileY)) return false;
-        if (block === "air") return false;
-        if (this.getBlock(tileX, tileY) !== "air") return false;
-        this.overrides.set(this.tileKey(tileX, tileY), block);
-        return true;
-    }
+	getChunksAround(tileX: number, tileY: number): Chunk[] {
+		const cx = Math.floor(tileX / MC2D_CHUNK_SIZE);
+		const cy = Math.floor(tileY / MC2D_CHUNK_SIZE);
 
-    isSolidAt(tileX: number, tileY: number): boolean {
-        return this.getBlock(tileX, tileY) !== "air";
-    }
+		const DIAM_X = 2 * CHUNK_RADIUS_X + 1;
+		const DIAM_Y = 2 * CHUNK_RADIUS_Y + 1;
+		const chunks = new Array<Chunk>(DIAM_X * DIAM_Y);
+		let  i = 0;
 
-    getChunksAround(tileX: number, tileY: number): Chunk[] {
-        const centerChunk = chunkCoordFromTile(tileX, tileY);
-        const chunks: Chunk[] = [];
-        for (let dy = -CHUNK_RADIUS_Y; dy <= CHUNK_RADIUS_Y; dy += 1) {
-            for (let dx = -CHUNK_RADIUS_X; dx <= CHUNK_RADIUS_X; dx += 1) {
-                const cx = centerChunk.chunkX + dx;
-                const cy = centerChunk.chunkY + dy;
-                chunks.push(this.buildChunkForClient(cx, cy));
-            }
-        }
-        return chunks;
-    }
+		for (let dy = -CHUNK_RADIUS_Y; dy <= CHUNK_RADIUS_Y; dy++) {
+			for (let dx = -CHUNK_RADIUS_X; dx <= CHUNK_RADIUS_X; dx++) {
+				chunks[i++] = this.buildChunk(cx + dx, cy + dy);
+			}
+		}
 
-    buildChunkForClient(chunkX: number, chunkY: number): Chunk {
-        const tiles: BlockType[] = [];
-        for (let localY = 0; localY < MC2D_CHUNK_SIZE; localY += 1) {
-            for (let localX = 0; localX < MC2D_CHUNK_SIZE; localX += 1) {
-                const tileX = chunkX * MC2D_CHUNK_SIZE + localX;
-                const tileY = chunkY * MC2D_CHUNK_SIZE + localY;
-                tiles.push(this.getBlockForClient(tileX, tileY));
-            }
-        }
-        return {
-            chunkX,
-            chunkY,
-            tiles
-        };
-    }
+		return chunks;
+	}
 
-    pickDiamondPos(): TilePos {
-        const xSpan = MC2D_WORLD_MAX_X - MC2D_WORLD_MIN_X + 1;
-        const ySpan = MC2D_DIAMOND_MAX_Y - MC2D_DIAMOND_MIN_Y + 1;
-        for (let attempt = 0; attempt < 512; attempt += 1) {
-            const rx = seededNoise(this.seed + 991, attempt, 17);
-            const ry = seededNoise(this.seed + 31337, attempt, 41);
-            const x = MC2D_WORLD_MIN_X + Math.floor(rx * xSpan);
-            const y = MC2D_DIAMOND_MIN_Y + Math.floor(ry * ySpan);
-            if (this.baseBlockAt(x, y) !== "air") {
-                return { x, y };
-            }
-        }
+	buildChunk(chunkX: number, chunkY: number): Chunk {
+		const tiles = new Array<BlockType>(CHUNK_AREA);
 
-        return {
-            x: Math.floor((MC2D_WORLD_MIN_X + MC2D_WORLD_MAX_X) / 2),
-            y: MC2D_DIAMOND_MIN_Y
-        };
-    }
+		for (let lx = 0; lx < MC2D_CHUNK_SIZE; lx++) {
+			const tx   = chunkX * MC2D_CHUNK_SIZE + lx;
+			const surf = this.surfaceAt(tx);
+			const trunk = this.trunkTopAt(tx, surf);
 
-    baseBlockAt(tileX: number, tileY: number): BlockType {
-        const surfaceY = this.surfaceAt(tileX);
-        if (tileY > surfaceY) {
-            const trunkTop = this.trunkTopAt(tileX, surfaceY);
-            if (tileY >= surfaceY + 1 && tileY <= trunkTop) return "trunk";
-            return "air";
-        }
+			for (let ly = 0; ly < MC2D_CHUNK_SIZE; ly++) {
+				const ty = chunkY * MC2D_CHUNK_SIZE + ly;
+				tiles[ly * MC2D_CHUNK_SIZE + lx] = this.blockAtCached(tx, ty, surf, trunk);
+			}
+		}
 
-        if (tileY === surfaceY) return "grass";
-        if (tileY >= surfaceY - 3) return "dirt";
+		return { chunkX, chunkY, tiles };
+	}
 
-        const depth = surfaceY - tileY;
-        const ironChance = seededNoise(this.seed + 9013, tileX, tileY);
-        if (depth > 16 && ironChance < MC2D_ORE_IRON_CHANCE) return "iron_ore";
-        return "stone";
-    }
+	private blockAtCached(tileX: number, tileY: number, surf: number, trunk: number): BlockType {
+		if (tileX < MC2D_WORLD_MIN_X || tileX > MC2D_WORLD_MAX_X) return "stone";
+		if (tileY < MC2D_WORLD_MIN_Y) return "stone";
+		if (tileY > MC2D_WORLD_MAX_Y) return "air";
 
-    surfaceAt(tileX: number): number {
-        const lowFreq = seededNoise(this.seed + 17, tileX, 0);
-        const highFreq = seededNoise(this.seed + 53, tileX * 3, 0);
-        const offset = Math.floor((lowFreq - 0.5) * 6 + (highFreq - 0.5) * 2);
-        return MC2D_SURFACE_BASE_Y + offset;
-    }
+		const override = this.overrides.get(this.tileKey(tileX, tileY));
+		if (override !== undefined) return override;
 
-    trunkTopAt(tileX: number, surfaceY: number): number {
-        const treeRoll = seededNoise(this.seed + 12007, tileX, 0);
-        if (treeRoll > MC2D_TREE_CHANCE) return surfaceY;
-        const heightNoise = seededNoise(this.seed + 12083, tileX, 1);
-        const height = 2 + Math.floor(heightNoise * 3);
-        return surfaceY + height;
-    }
+		if (tileX === this.diamondPos.x && tileY === this.diamondPos.y) return "diamond";
 
-    isWithinMutableBounds(tileX: number, tileY: number): boolean {
-        return tileX >= MC2D_WORLD_MIN_X
-            && tileX <= MC2D_WORLD_MAX_X
-            && tileY >= MC2D_WORLD_MIN_Y
-            && tileY <= MC2D_WORLD_MAX_Y;
-    }
+		return this.baseBlockAtCached(tileX, tileY, surf, trunk);
+	}
 
-    tileKey(tileX: number, tileY: number): string {
-        return `${tileX}:${tileY}`;
-    }
+	baseBlockAt(tileX: number, tileY: number): BlockType {
+		const surf  = this.surfaceAt(tileX);
+		const trunk = this.trunkTopAt(tileX, surf);
+		return this.baseBlockAtCached(tileX, tileY, surf, trunk);
+	}
+
+	private baseBlockAtCached(tileX: number, tileY: number, surf: number, trunk: number): BlockType {
+		if (tileY > surf) {
+			return (tileY >= surf + 1 && tileY <= trunk) ? "trunk" : "air";
+		}
+		if (tileY === surf) return "grass";
+		if (tileY >= surf - 3) return "dirt";
+
+		const depth = surf - tileY;
+		if (depth > 16 && seededNoise(this.seed + 9013, tileX, tileY) < MC2D_ORE_IRON_CHANCE) return "iron_ore";
+		return "stone";
+	}
+
+	surfaceAt(tileX: number): number {
+		const lo = seededNoise(this.seed + 17, tileX, 0);
+		const hi = seededNoise(this.seed + 53, tileX * 3, 0);
+		return MC2D_SURFACE_BASE_Y + Math.floor((lo - 0.5) * 6 + (hi - 0.5) * 2);
+	}
+
+	trunkTopAt(tileX: number, surfaceY: number): number {
+		if (seededNoise(this.seed + 12007, tileX, 0) > MC2D_TREE_CHANCE) return surfaceY;
+		return surfaceY + 2 + Math.floor(seededNoise(this.seed + 12083, tileX, 1) * 3);
+	}
+
+	pickDiamondPos(): TilePos {
+		const xSpan = MC2D_WORLD_MAX_X - MC2D_WORLD_MIN_X + 1;
+		const ySpan = MC2D_DIAMOND_MAX_Y - MC2D_DIAMOND_MIN_Y + 1;
+
+		for (let attempt = 0; attempt < 512; attempt++) {
+			const x = MC2D_WORLD_MIN_X + Math.floor(seededNoise(this.seed + 991,   attempt, 17) * xSpan);
+			const y = MC2D_DIAMOND_MIN_Y + Math.floor(seededNoise(this.seed + 31337, attempt, 41) * ySpan);
+			if (this.baseBlockAt(x, y) !== "air") return { x, y };
+		}
+
+		return { x: Math.floor((MC2D_WORLD_MIN_X + MC2D_WORLD_MAX_X) / 2), y: MC2D_DIAMOND_MIN_Y };
+	}
+
+	inBounds(tileX: number, tileY: number): boolean {
+		return tileX >= MC2D_WORLD_MIN_X && tileX <= MC2D_WORLD_MAX_X
+			&& tileY >= MC2D_WORLD_MIN_Y && tileY <= MC2D_WORLD_MAX_Y;
+	}
+
+	private tileKey(tileX: number, tileY: number): number {
+		return (tileX + KEY_X_OFF) * KEY_MUL + (tileY + KEY_Y_OFF);
+	}
 }

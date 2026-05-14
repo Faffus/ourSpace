@@ -50,7 +50,9 @@ export const GAMES: Record<string, GameInfo> = {
     minecraft2d: {
         client: MinecraftDiamondRushClient,
         server: MinecraftDiamondRushServer,
-        name: 'Minecraft Diamond Rush'
+        name: 'Minecraft Diamond Rush',
+        minPlayers: 1,
+        maxPlayers: 99
     },
     doom: {
         client: DoomGameClient,
