@@ -32,7 +32,8 @@ export const GAMES: Record<string, GameInfo> = {
     shooter: {
         server: shooterServer,
         client: shooterClient,
-        name:'topShooter'
+        name:'topShooter',
+        minPlayers: 1
     },
     brawl: {
         client: BrawlClient,
