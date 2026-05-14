@@ -57,6 +57,11 @@ type ServerGameProposalAcceptedMsg = {
     proposalId: string;
     accepterId: string;
 };
+type ServerGameProposalRefusedMsg = {
+    kind: "gameProposalRefused";
+    proposalId: string;
+    reason: string;
+};
 
 type GameStartedMsg = {
     kind: "gameStarted";
@@ -72,6 +77,7 @@ type LobbyServerMsg =
     | ServerExitMsg
     | ServerGameProposalMsg
     | ServerGameProposalAcceptedMsg
+    | ServerGameProposalRefusedMsg
     | GameStartedMsg
     | GameMsg;
 
@@ -268,22 +274,38 @@ export class LobbyServer {
             }
             else if (payload.kind === "gameProposalAccept") {
                 if (this.currentProposal && this.currentProposal.proposalId === payload.proposalId) {
-                    this.currentProposal.acceptedPlayerIds.add(clientId);
-                    messages.push({
-                        payload: {
-                            kind: 'gameProposalAccepted',
-                            proposalId: payload.proposalId,
-                            accepterId: clientId
-                        } as ServerGameProposalAcceptedMsg
-                    })
+                    const { acceptedPlayerIds, gameKey } = this.currentProposal;
+                    const { maxPlayers } = GAMES[gameKey];
+                    if (acceptedPlayerIds.size < maxPlayers) {
+                        this.currentProposal.acceptedPlayerIds.add(clientId);
+                        messages.push({
+                            payload: {
+                                kind: 'gameProposalAccepted',
+                                proposalId: payload.proposalId,
+                                accepterId: clientId
+                            } as ServerGameProposalAcceptedMsg
+                        })
+                    }
+                    else {
+                        messages.push({
+                            payload: {
+                                kind: 'gameProposalRefused',
+                                proposalId: payload.proposalId,
+                                reason: 'full'
+                            } as ServerGameProposalRefusedMsg,
+                            clientId
+                        })
+                    }
                 }
             }
-            else if (payload.kind === "startGame") {
-                // Check if this is the proposer starting a proposed game
-                if (this.currentProposal && this.currentProposal.proposerId === clientId) {
+            else if (payload.kind === "startGame" && this.currentProposal) {
+                const { acceptedPlayerIds, gameKey } = this.currentProposal;
+                const { minPlayers } = GAMES[gameKey];
+
+                if (acceptedPlayerIds.size >= minPlayers && this.currentProposal.proposerId === clientId) {
                     const gameStartedMessage = this.startGameFromProposal();
                     if (gameStartedMessage) messages.push(gameStartedMessage);
-                } 
+                }
             }
         });
 
@@ -461,7 +483,7 @@ export class LobbyClient {
                 proposalId
             });
         };
-        this.gameSelect = new GameSelect( userInput,
+        this.gameSelect = new GameSelect(userInput,
             onGameSelected, onGameJoined, onGameStarted);
 
         this.gamesBtn = new Button('Games', userInput, () => {
@@ -592,6 +614,12 @@ export class LobbyClient {
             const { proposalId, accepterId } = message;
             const accepter = this.people[message.accepterId];
             this.gameSelect.addPlayerToProposal(proposalId, accepterId, accepter);
+        }
+        else if (message.kind === "gameProposalRefused") {
+            const { reason } = message;
+            if (reason === 'full') alert("Can't join, game is full");
+            else alert("Couldn't join game");
+            this.gameSelect.exitJoinedGame();
         }
         else if (message.kind === "game") {
             if (this.currentGame && message.gameId === this.currentGameId) {

@@ -24,6 +24,7 @@ export class GameSelect {
         isProposer: boolean;
         proposerName: string;
         gameName: string;
+        gameKey: string;
     } | null = null;
 
     private joinedGame: boolean;
@@ -68,7 +69,8 @@ export class GameSelect {
             if (this.gameProposal !== null) return;
             if (!this.isShowing()) return; // bad hack
 
-            this.hide();
+            if (this.joinedGame) this.exitJoinedGame();
+            else this.hide();
         });
         this.exitBtn.setColors({ main: "#a51515" });
 
@@ -84,7 +86,12 @@ export class GameSelect {
             if (this.gameProposal === null) return;
             if (!this.isShowing()) return; // bad hack
 
-            this.onGameStarted(this.gameProposal.proposalId);
+            const { gameKey, players } = this.gameProposal;
+            const { minPlayers } = GAMES[gameKey];
+            if (minPlayers <= Object.keys(players).length)
+                this.onGameStarted(this.gameProposal.proposalId);
+            else
+                alert(`You need at least ${minPlayers} players to start the game`);
         });
     }
     
@@ -107,7 +114,7 @@ export class GameSelect {
         ctx.fill();
         ctx.stroke();
 
-        if (this.gameProposal === null) {
+        if (this.gameProposal === null) { // select game
             const gameKey = this.gameKeys[this.selectedGameKeyIndex];
             const gameName = GAMES[gameKey].name;
             
@@ -129,7 +136,7 @@ export class GameSelect {
             this.exitBtn.draw(ctx, -side*0.4, side/2 - okBtnH - padding, okBtnW, okBtnH);
             this.playBtn.draw(ctx, side*0.1, side/2 - okBtnH - padding, okBtnW, okBtnH);
         }
-        else {
+        else { // joined game waiting for it to start
             const { proposerName, gameName, players } = this.gameProposal;
             const playersVertPadding = side*0.2;
 
@@ -189,7 +196,7 @@ export class GameSelect {
         const gameName = GAMES[gameKey].name;
         this.gameProposal = {
             proposalId, proposerId, players, isProposer,
-            proposerName, gameName
+            proposerName, gameName, gameKey
         };
         this.joinedGame = false;
     }
@@ -202,6 +209,10 @@ export class GameSelect {
 
     scratchGameProposal() {
         this.gameProposal = null;
+    }
+
+    exitJoinedGame() {
+        this.joinedGame = false;
     }
 
     show() { this.isVisible = true; }

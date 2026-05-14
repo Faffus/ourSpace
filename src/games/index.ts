@@ -10,6 +10,8 @@ export type GameInfo = {
     client: new (userInput: UserInput, myId: string) => GameClient;
     server: new () => GameServer;
     name: string;
+    minPlayers?: number;
+    maxPlayers?: number;
 }
 
 export const GAMES: Record<string, GameInfo> = {
@@ -21,7 +23,9 @@ export const GAMES: Record<string, GameInfo> = {
     pong: {
         client: PongClient,
         server: PongServer,
-        name: 'Pong'
+        name: 'Pong',
+        minPlayers: 2,
+        maxPlayers: 2
     },
     brawl: {
         client: BrawlClient,
