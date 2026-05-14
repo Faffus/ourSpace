@@ -2,6 +2,7 @@ import { GameServer, GameClient } from "./game";
 import { UserInput } from "../client/user-input";
 import { GuessGameClient, GuessGameServer } from "./guess";
 import { PongClient, PongServer } from "./multi-pong";
+import { shooterClient, shooterServer } from "./topShooter";
 import { BrawlClient , BrawlServer } from "./brawl";
 import { MicroRacingClient, MicroRacingServer } from "./micro-racing";
 import { MinecraftDiamondRushClient, MinecraftDiamondRushServer } from "./minecraft2d";
@@ -26,6 +27,14 @@ export const GAMES: Record<string, GameInfo> = {
         name: 'Pong',
         minPlayers: 2,
         maxPlayers: 2
+    },
+
+    shooter: {
+        server: shooterServer,
+        client: shooterClient,
+        name:'topShooter',
+        minPlayers: 1,
+        maxPlayers: 4
     },
     brawl: {
         client: BrawlClient,
