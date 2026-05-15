@@ -564,25 +564,47 @@ export class HeadBallClient extends GameClient {
 
     // ── Input ───────────────────────────────────────────────────────────────
 
+    private prevMoveX:    number  = 0;
+    private prevJump:     boolean = false;
+    private prevTeleport: boolean = false;
+    private prevSelMoveX: number  = 0;
+
     private readInput(): void {
         const inp = this.userInput;
 
-        if (this.gamePhase === 'selection') {
-            // I tasti freccia / A-D cambiano personaggio; Enter/Space conferma
-            // (la UserInput espone moveDirectionX e jump)
-            // Usiamo un approccio semplificato: click virtuale via tastiera
+        // Selezione personaggio: A/D cambiano personaggio, S conferma
+        if (this.gamePhase === 'selection' && !this.selectionConfirmed) {
+            const selMoveX = inp.moveDirectionX;
+            if (selMoveX !== this.prevSelMoveX) {
+                this.prevSelMoveX = selMoveX;
+                if (selMoveX > 0) {
+                    this.selectedCharIndex = (this.selectedCharIndex + 1) % CHARACTER_DEFS.length;
+                    this.outbox.push({ kind: 'selection:update', characterId: CHARACTER_DEFS[this.selectedCharIndex].id });
+                } else if (selMoveX < 0) {
+                    this.selectedCharIndex = (this.selectedCharIndex - 1 + CHARACTER_DEFS.length) % CHARACTER_DEFS.length;
+                    this.outbox.push({ kind: 'selection:update', characterId: CHARACTER_DEFS[this.selectedCharIndex].id });
+                }
+            }
+            // S (moveDirectionY > 0) = conferma selezione
+            if (inp.moveDirectionY > 0) {
+                this.selectionConfirmed = true;
+                this.outbox.push({ kind: 'selection:confirm', characterId: CHARACTER_DEFS[this.selectedCharIndex].id });
+            }
             return;
         }
 
+        // Gioco: A/D movimento, W salto, click sinistro teletrasporto
         if (this.gamePhase === 'playing') {
-            const moveX = inp.moveDirectionX ?? 0;
-            const jump  = (inp as any).jump  ?? false;
-            this.outbox.push({
-                kind:     'input',
-                moveX:    moveX,
-                jump:     jump,
-                teleport: false
-            });
+            const moveX    = inp.moveDirectionX;
+            const jump     = inp.moveDirectionY < 0;
+            const teleport = inp.isMouseLeftPressed;
+
+            if (moveX !== this.prevMoveX || jump !== this.prevJump || teleport !== this.prevTeleport) {
+                this.prevMoveX    = moveX;
+                this.prevJump     = jump;
+                this.prevTeleport = teleport;
+                this.outbox.push({ kind: 'input', moveX, jump, teleport });
+            }
         }
     }
 
