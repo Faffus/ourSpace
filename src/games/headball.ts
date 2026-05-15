@@ -286,7 +286,7 @@ export class HeadBallServer extends GameServer {
             }
         }
 
-        return [{ kind: 'broadcast', payload: this.buildSnapshot() }];
+        return [{ payload: this.buildSnapshot() }]; // nessun clientId = broadcast a tutti
     }
 
     isFinished(): boolean {
