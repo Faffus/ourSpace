@@ -72,7 +72,7 @@ export const GAMES: Record<string, GameInfo> = {
     headball: {                        
         client: HeadBallClient,
         server: HeadBallServer,
-        name: 'Head Ball Online',
+        name: 'Head Ball',
         minPlayers: 2,
         maxPlayers: 2
     }
