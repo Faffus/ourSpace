@@ -1,4 +1,4 @@
-export const TICK_FREQUENCY = 30; // ticks per second
+export const TICK_FREQUENCY = 60; // ticks per second
 export const PERSON_W = 40;
 export const PERSON_H = 120;
 export const EPSILON = 0.0001;
