@@ -5,12 +5,20 @@ import { UserInput } from '../client/user-input';
 import { Button } from '../client/ui-elements';
 
 const TILE_SIZE = 64;
-const PLAYER_RADIUS = 14;
-const PLAYER_SPEED = 180;
-const STRAFE_SPEED = 130;
+const PLAYER_RADIUS = 11;
+const PLAYER_SPEED = 160;
+const STRAFE_SPEED = 115;
+const WALL_GLIDE_SPEED = 110;
 const ROTATION_SPEED = 2.8;
 const FOV = Math.PI / 3;
 const MAX_VIEW_DISTANCE = TILE_SIZE * 14;
+const DEFAULT_MOUSE_LOOK_SENSITIVITY = 0.0012;
+const MIN_MOUSE_LOOK_SENSITIVITY = 0;
+const MAX_MOUSE_LOOK_SENSITIVITY = DEFAULT_MOUSE_LOOK_SENSITIVITY;
+const MOUSE_LOOK_SENSITIVITY_STEP = DEFAULT_MOUSE_LOOK_SENSITIVITY / 20;
+const MOUSE_LOOK_ASSIST = 0.8;
+const MAX_LOOK_DELTA_PER_INPUT = Math.PI / 2;
+const MOUSE_SENSITIVITY_KEY = "doomMouseSensitivity";
 const MAX_LIFE = 100;
 const RESPAWN_TIME = 2;
 const TIMED_GAME_TIME = 180;
@@ -221,7 +229,7 @@ const WEAPONS: Record<WeaponName, WeaponInfo> = {
         damage: 30,
         cooldown: 0.45,
         range: TILE_SIZE * 7,
-        aim: 0.12,
+        aim: 0.012,
         color: "#c9c9c9",
         flashColor: "rgba(245, 198, 80, 0.7)",
         traceColor: "rgba(255, 232, 130, 0.42)",
@@ -243,7 +251,7 @@ const WEAPONS: Record<WeaponName, WeaponInfo> = {
         damage: 58,
         cooldown: 0.85,
         range: TILE_SIZE * 5,
-        aim: 0.22,
+        aim: 0.035,
         color: "#d8a241",
         flashColor: "rgba(255, 176, 66, 0.75)",
         traceColor: "rgba(255, 206, 122, 0.32)",
@@ -265,7 +273,7 @@ const WEAPONS: Record<WeaponName, WeaponInfo> = {
         damage: 22,
         cooldown: 0.18,
         range: TILE_SIZE * 8,
-        aim: 0.08,
+        aim: 0.010,
         color: "#6fb1d8",
         flashColor: "rgba(255, 219, 112, 0.68)",
         traceColor: "rgba(255, 238, 156, 0.34)",
@@ -287,7 +295,7 @@ const WEAPONS: Record<WeaponName, WeaponInfo> = {
         damage: 115,
         cooldown: 1.15,
         range: TILE_SIZE * 9,
-        aim: 0.10,
+        aim: 0.006,
         color: "#9bc2c8",
         flashColor: "rgba(255, 104, 54, 0.72)",
         traceColor: "rgba(255, 107, 55, 0.48)",
@@ -309,7 +317,7 @@ const WEAPONS: Record<WeaponName, WeaponInfo> = {
         damage: 28,
         cooldown: 0.24,
         range: TILE_SIZE * 7,
-        aim: 0.11,
+        aim: 0.010,
         color: "#71c9ff",
         flashColor: "rgba(94, 203, 255, 0.72)",
         traceColor: "rgba(98, 215, 255, 0.44)",
@@ -331,7 +339,7 @@ const WEAPONS: Record<WeaponName, WeaponInfo> = {
         damage: 150,
         cooldown: 1.45,
         range: TILE_SIZE * 8,
-        aim: 0.18,
+        aim: 0.018,
         color: "#71e889",
         flashColor: "rgba(92, 255, 128, 0.66)",
         traceColor: "rgba(112, 255, 146, 0.52)",
@@ -381,6 +389,7 @@ type DoomInput = {
     forward: number;
     strafe: number;
     turn: number;
+    look: number;
     shoot: boolean;
     weapon: WeaponName;
 }
@@ -656,6 +665,7 @@ export class DoomGameServer extends GameServer {
                 forward: 0,
                 strafe: 0,
                 turn: 0,
+                look: 0,
                 shoot: false,
                 weapon: "pistol"
             };
@@ -677,6 +687,8 @@ export class DoomGameServer extends GameServer {
 
             if (payload.kind === "doom_input" && this.players[message.clientId]) {
                 const player = this.players[message.clientId];
+                const previousInput = this.inputs[message.clientId];
+                const lookDelta = clamp(payload.input.look || 0, -MAX_LOOK_DELTA_PER_INPUT, MAX_LOOK_DELTA_PER_INPUT);
                 if (isWeaponName(payload.input.weapon) && player.weapons.indexOf(payload.input.weapon) >= 0) {
                     player.weapon = payload.input.weapon;
                 }
@@ -685,6 +697,7 @@ export class DoomGameServer extends GameServer {
                     forward: clamp(payload.input.forward, -1, 1),
                     strafe: clamp(payload.input.strafe, -1, 1),
                     turn: clamp(payload.input.turn, -1, 1),
+                    look: clamp((previousInput?.look || 0) + lookDelta, -MAX_LOOK_DELTA_PER_INPUT, MAX_LOOK_DELTA_PER_INPUT),
                     shoot: payload.input.shoot,
                     weapon: player.weapon
                 };
@@ -714,21 +727,27 @@ export class DoomGameServer extends GameServer {
 
         Object.keys(this.players).forEach(id => {
             const player = this.players[id];
+            const input = this.inputs[id];
 
-            if (player.dead) return;
+            if (player.dead) {
+                input.look = 0;
+                return;
+            }
 
             if (player.respawn > 0) {
                 player.respawn -= dt;
+                input.look = 0;
                 if (player.respawn <= 0) this.respawnPlayer(id);
                 return;
             }
 
             player.reload = Math.max(0, player.reload - dt);
-            this.movePlayer(player, this.inputs[id], dt);
+            this.movePlayer(player, input, dt);
+            input.look = 0;
             this.pickupWeapon(player);
 
             const weapon = WEAPONS[player.weapon];
-            const wantsShoot = weapon.auto ? this.inputs[id].shoot : this.shootBuffers[id] > 0;
+            const wantsShoot = weapon.auto ? input.shoot : this.shootBuffers[id] > 0;
             if (wantsShoot && player.reload <= 0) {
                 this.shoot(id);
                 this.shootBuffers[id] = 0;
@@ -837,7 +856,7 @@ export class DoomGameServer extends GameServer {
         const oldX = player.x;
         const oldY = player.y;
 
-        player.angle += input.turn * ROTATION_SPEED * dt;
+        player.angle += input.turn * ROTATION_SPEED * dt + input.look;
         player.angle = normalizeAngle(player.angle);
 
         const forwardX = Math.cos(player.angle) * input.forward;
@@ -848,10 +867,31 @@ export class DoomGameServer extends GameServer {
         const nextX = player.x + (forwardX * PLAYER_SPEED + sideX * STRAFE_SPEED) * dt;
         const nextY = player.y + (forwardY * PLAYER_SPEED + sideY * STRAFE_SPEED) * dt;
 
-        if (canMove(this.map, nextX, player.y)) player.x = nextX;
-        if (canMove(this.map, player.x, nextY)) player.y = nextY;
+        const movedX = canMove(this.map, nextX, player.y);
+        if (movedX) player.x = nextX;
+
+        const movedY = canMove(this.map, player.x, nextY);
+        if (movedY) player.y = nextY;
+
+        const movedDistance = distanceBetween({ x: oldX, y: oldY }, player);
+        if (input.forward !== 0 && (!movedX || !movedY) && movedDistance < PLAYER_SPEED * dt * 0.55) {
+            const turnSign = input.look < 0 || input.turn < 0 ? -1 : 1;
+            if (!this.glideAlongWall(player, turnSign, dt)) this.glideAlongWall(player, -turnSign, dt);
+        }
 
         player.moving = distanceBetween({ x: oldX, y: oldY }, player) > 0.5;
+    }
+
+    private glideAlongWall(player: DoomPlayer, direction: number, dt: number): boolean {
+        const angle = player.angle + Math.PI / 2 * direction;
+        const nextX = player.x + Math.cos(angle) * WALL_GLIDE_SPEED * dt;
+        const nextY = player.y + Math.sin(angle) * WALL_GLIDE_SPEED * dt;
+
+        if (!canMove(this.map, nextX, nextY)) return false;
+
+        player.x = nextX;
+        player.y = nextY;
+        return true;
     }
 
     private pickupWeapon(player: DoomPlayer) {
@@ -892,7 +932,7 @@ export class DoomGameServer extends GameServer {
 
         let hitId: string | undefined = undefined;
         let hitAngleDiff = 0;
-        const aim = weapon.shotStyle === "beam" ? weapon.aim * 1.45 : weapon.shotStyle === "bfg" ? weapon.aim * 1.65 : weapon.aim;
+        const aim = weapon.shotStyle === "beam" ? weapon.aim * 1.25 : weapon.shotStyle === "bfg" ? weapon.aim * 1.35 : weapon.aim;
         const wallHit = castRay(this.map, shooter.x, shooter.y, shooter.angle, weapon.range);
         let hitDistance = Math.min(weapon.range, wallHit.distance);
 
@@ -1233,7 +1273,10 @@ export class DoomGameClient extends GameClient {
     private strafeRight: boolean = false;
     private turnLeft: boolean = false;
     private turnRight: boolean = false;
-    private focusMove: boolean = false;
+    private pendingLook: number = 0;
+    private lastLookTime: number = 0;
+    private lastLookDelta: number = 0;
+    private mouseSensitivity: number = DEFAULT_MOUSE_LOOK_SENSITIVITY;
     private shotToDraw: DoomShot | null = null;
     private shotTimer: number = 0;
     private shotDuration: number = 0;
@@ -1255,25 +1298,21 @@ export class DoomGameClient extends GameClient {
             this.sounds[name] = new Audio(`${DOOM_ASSET_PATH}/sounds/${name}.wav`);
         });
 
+        const savedSensitivity = localStorage.getItem(MOUSE_SENSITIVITY_KEY);
+        if (savedSensitivity !== null && Number.isFinite(Number(savedSensitivity))) {
+            this.mouseSensitivity = clamp(Number(savedSensitivity), MIN_MOUSE_LOOK_SENSITIVITY, MAX_MOUSE_LOOK_SENSITIVITY);
+        }
+
         this.exitButton = new Button("exit", this.userInput, () => {
             this.userExited = true;
+            this.releaseMouseLook();
         });
         this.exitButton.setColors({ main: "#7b1f1f" });
 
-        this.battleButton = new Button("Battle Royale", this.userInput, () => {
-            this.messageQueue.push({
-                kind: "doom_select_mode",
-                mode: "battle_royale"
-            });
-        });
+        this.battleButton = new Button("Battle Royale", this.userInput, () => this.selectMode("battle_royale"));
         this.battleButton.setColors({ main: "#8d2d2d" });
 
-        this.timedButton = new Button("A tempo", this.userInput, () => {
-            this.messageQueue.push({
-                kind: "doom_select_mode",
-                mode: "timed"
-            });
-        });
+        this.timedButton = new Button("A tempo", this.userInput, () => this.selectMode("timed"));
         this.timedButton.setColors({ main: "#2d6b86" });
 
         document.addEventListener("keydown", event => {
@@ -1308,12 +1347,17 @@ export class DoomGameClient extends GameClient {
                 this.turnRight = true;
                 event.preventDefault();
             }
-            else if (event.code === "ShiftLeft" || event.code === "ShiftRight") {
-                this.focusMove = true;
+            else if (event.code === "NumpadSubtract") {
+                this.changeMouseSensitivity(-1);
+                event.preventDefault();
+            }
+            else if (event.code === "NumpadAdd") {
+                this.changeMouseSensitivity(1);
                 event.preventDefault();
             }
             else if (event.code === "Escape") {
                 this.userExited = true;
+                this.releaseMouseLook();
             }
         });
 
@@ -1323,19 +1367,135 @@ export class DoomGameClient extends GameClient {
             else if (event.code === "KeyE") this.strafeRight = false;
             else if (event.code === "ArrowLeft") this.turnLeft = false;
             else if (event.code === "ArrowRight") this.turnRight = false;
-            else if (event.code === "ShiftLeft" || event.code === "ShiftRight") this.focusMove = false;
+            else if (event.code === "Escape") {
+                this.userExited = true;
+                this.releaseMouseLook();
+            }
         });
 
-        this.userInput.canvas.addEventListener("pointerdown", () => {
+        document.addEventListener("pointerlockchange", () => {
+            if (document.pointerLockElement === this.userInput.canvas) return;
+
+            this.pendingLook = 0;
+            this.shootHeld = false;
+            this.userInput.canvas.style.cursor = "default";
+            if (this.phase === "playing" && !this.gameOver && !this.userExited) this.userExited = true;
+        });
+
+        document.addEventListener("pointermove", event => {
+            if (document.pointerLockElement !== this.userInput.canvas) return;
+            this.queueMouseLook(event.movementX, event.timeStamp);
+        });
+
+        this.userInput.canvas.addEventListener("pointerdown", event => {
             this.unlockSounds();
+            if (!this.userExited && this.phase === "mode_select") {
+                if (this.battleButton.isInside(event)) this.selectMode("battle_royale");
+                else if (this.timedButton.isInside(event)) this.selectMode("timed");
+                else return;
+
+                event.preventDefault();
+                return;
+            }
+
             if (!this.userExited && this.phase === "playing") {
+                if (this.exitButton.isInside(event)) return;
+
+                if (document.pointerLockElement !== this.userInput.canvas) {
+                    this.requestMouseLook();
+                    event.preventDefault();
+                    return;
+                }
+
                 this.shootHeld = true;
                 this.shootPressed = true;
+                event.preventDefault();
             }
         });
         this.userInput.canvas.addEventListener("pointerup", () => this.shootHeld = false);
-        this.userInput.canvas.addEventListener("pointerleave", () => this.shootHeld = false);
-        this.userInput.canvas.addEventListener("pointercancel", () => this.shootHeld = false);
+        this.userInput.canvas.addEventListener("wheel", event => {
+            if (this.userExited || this.phase !== "playing" || event.deltaY === 0) return;
+
+            this.cycleWeapon(event.deltaY > 0 ? 1 : -1);
+            event.preventDefault();
+            event.stopPropagation();
+        }, { passive: false });
+        document.addEventListener("mouseup", () => this.shootHeld = false);
+    }
+
+    private selectMode(mode: DoomMode) {
+        this.requestMouseLook();
+        if (this.messageQueue.some(message => message.kind === "doom_select_mode")) return;
+
+        this.messageQueue.push({
+            kind: "doom_select_mode",
+            mode
+        });
+    }
+
+    private changeMouseSensitivity(direction: number) {
+        this.mouseSensitivity = clamp(
+            this.mouseSensitivity + direction * MOUSE_LOOK_SENSITIVITY_STEP,
+            MIN_MOUSE_LOOK_SENSITIVITY,
+            MAX_MOUSE_LOOK_SENSITIVITY
+        );
+        localStorage.setItem(MOUSE_SENSITIVITY_KEY, `${this.mouseSensitivity}`);
+    }
+
+    private cycleWeapon(direction: number) {
+        const me = this.players ? this.players[this.myId] : null;
+        const ownedWeapons = WEAPON_ORDER.filter(weapon => !me || me.weapons.indexOf(weapon) >= 0);
+        if (ownedWeapons.length <= 1) return;
+
+        const currentWeapon = ownedWeapons.indexOf(this.selectedWeapon) >= 0 ? this.selectedWeapon : me?.weapon || "pistol";
+        const currentIndex = ownedWeapons.indexOf(currentWeapon);
+        const nextIndex = (currentIndex + direction + ownedWeapons.length) % ownedWeapons.length;
+        this.selectedWeapon = ownedWeapons[nextIndex];
+        this.pendingWeapon = this.selectedWeapon;
+    }
+
+    private queueMouseLook(pixelDelta: number, time: number) {
+        if (this.userExited || this.phase !== "playing") return;
+        if (!Number.isFinite(pixelDelta) || pixelDelta === 0) return;
+        if (time && Math.abs(time - this.lastLookTime) < 2 && pixelDelta === this.lastLookDelta) return;
+
+        this.lastLookTime = time;
+        this.lastLookDelta = pixelDelta;
+
+        const fastMove = Math.max(0, Math.abs(pixelDelta) - 4);
+        const assist = 1 + clamp(fastMove / 40, 0, 1) * MOUSE_LOOK_ASSIST;
+        this.pendingLook = clamp(
+            this.pendingLook + pixelDelta * this.mouseSensitivity * assist,
+            -MAX_LOOK_DELTA_PER_INPUT,
+            MAX_LOOK_DELTA_PER_INPUT
+        );
+    }
+
+    private consumeMouseLook(): number {
+        const look = this.pendingLook;
+        this.pendingLook = 0;
+        return look;
+    }
+
+    private requestMouseLook() {
+        if (document.pointerLockElement === this.userInput.canvas) return;
+        if (this.userInput.canvas.requestPointerLock) this.userInput.canvas.requestPointerLock();
+    }
+
+    private releaseMouseLook() {
+        this.pendingLook = 0;
+        this.shootHeld = false;
+        this.userInput.canvas.style.cursor = "default";
+        if (document.pointerLockElement === this.userInput.canvas && document.exitPointerLock) {
+            document.exitPointerLock();
+        }
+    }
+
+    private updateMouseCursor() {
+        this.userInput.canvas.style.cursor = this.phase === "playing" &&
+            !this.gameOver &&
+            !this.userExited &&
+            document.pointerLockElement === this.userInput.canvas ? "none" : "default";
     }
 
     async init(players: Record<string, Player>): Promise<void> {
@@ -1350,6 +1510,7 @@ export class DoomGameClient extends GameClient {
     draw(ctx: CanvasRenderingContext2D, dt: number) {
         const { screenW, screenH } = this.userInput;
         this.animTime += dt;
+        this.updateMouseCursor();
 
         ctx.fillStyle = "#111111";
         ctx.fillRect(0, 0, screenW, screenH);
@@ -1395,6 +1556,8 @@ export class DoomGameClient extends GameClient {
         this.gameOver = message.gameOver;
         this.winnerId = message.winnerId;
         this.events = message.events || [];
+
+        if (this.phase !== "playing") this.releaseMouseLook();
 
         if (this.players[this.myId]) {
             const me = this.players[this.myId];
@@ -1459,14 +1622,14 @@ export class DoomGameClient extends GameClient {
         if (this.phase !== "playing") {
             this.shootPressed = false;
             this.shootHeld = false;
+            this.pendingLook = 0;
             return messages;
         }
 
         const forward = -this.userInput.moveDirectionY;
         const keyboardTurn = (this.turnRight ? 1 : 0) - (this.turnLeft ? 1 : 0);
-        const focusStrafe = this.focusMove ? this.userInput.moveDirectionX : 0;
-        const turn = clamp((this.focusMove ? 0 : this.userInput.moveDirectionX) + keyboardTurn, -1, 1);
-        const strafe = clamp((this.strafeRight ? 1 : 0) - (this.strafeLeft ? 1 : 0) + focusStrafe, -1, 1);
+        const turn = clamp(keyboardTurn, -1, 1);
+        const strafe = clamp((this.strafeRight ? 1 : 0) - (this.strafeLeft ? 1 : 0) + this.userInput.moveDirectionX, -1, 1);
         const currentWeapon = this.players && this.players[this.myId] ? this.players[this.myId].weapon : this.selectedWeapon;
 
         const message: DoomClientMsg = {
@@ -1475,6 +1638,7 @@ export class DoomGameClient extends GameClient {
                 forward,
                 strafe,
                 turn,
+                look: this.consumeMouseLook(),
                 shoot: WEAPONS[currentWeapon].auto ? this.shootHeld : this.shootPressed,
                 weapon: this.selectedWeapon
             }
@@ -1906,7 +2070,26 @@ export class DoomGameClient extends GameClient {
             ctx.fillText(me.dead ? "ELIMINATO" : "RESPAWN", screenW / 2, screenH / 2);
         }
 
+        this.drawSensitivitySettings(ctx, screenW - 174, hudY - 48);
         this.exitButton.draw(ctx, screenW - 97, 18, 78, 30);
+    }
+
+    private drawSensitivitySettings(ctx: CanvasRenderingContext2D, x: number, y: number) {
+        const sensitivityPercent = Math.round(this.mouseSensitivity / DEFAULT_MOUSE_LOOK_SENSITIVITY * 100);
+
+        ctx.fillStyle = "rgba(8, 10, 12, 0.74)";
+        ctx.fillRect(x, y, 156, 36);
+        ctx.strokeStyle = "rgba(255, 255, 255, 0.16)";
+        ctx.strokeRect(x, y, 156, 36);
+
+        ctx.fillStyle = "#9a9a9a";
+        ctx.font = "bold 10px Arial";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText("SENS NUM +/-", x + 78, y + 11);
+        ctx.fillStyle = "#eeeeee";
+        ctx.font = "bold 15px Arial";
+        ctx.fillText(`${sensitivityPercent}%`, x + 78, y + 25);
     }
 
     private drawWeaponSlots(ctx: CanvasRenderingContext2D, me: DoomPlayer, y: number) {
