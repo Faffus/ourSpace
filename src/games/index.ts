@@ -2,7 +2,7 @@ import { GameServer, GameClient } from "./game";
 import { UserInput } from "../client/user-input";
 import { GuessGameClient, GuessGameServer } from "./guess";
 import { PongClient, PongServer } from "./multi-pong";
-import { MinecraftDiamondRushClient, MinecraftDiamondRushServer } from "./minecraft2d";
+import { MinecraftDiamondRushClient, MinecraftDiamondRushServer } from "./minecraft2d.js";
 
 export type GameInfo = {
     client: new (userInput: UserInput, myId: string) => GameClient;
