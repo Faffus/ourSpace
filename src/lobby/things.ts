@@ -1,4 +1,4 @@
-import { changeLighness, ColorHSL, hexToColorHSL, PERSON_H, PERSON_W, Rectangle, smoothChange, toHSLString } from "../common";
+import { changeLighness, PERSON_H, PERSON_W, Rectangle, smoothChange } from "../common";
 
 export class Arcade {
     rect: Rectangle;
@@ -32,10 +32,9 @@ export class Arcade {
         this.interiorColor = "#373737";
         this.wallColor = "#9e9e9e";
         this.wallSectionColor = "#9e9e9e";
-        const roofColor = hexToColorHSL("#c12000");
-        this.roofColor = toHSLString(roofColor);
-        this.roofColorLight = toHSLString(changeLighness(roofColor, 0.2));
-        this.roofColorDark = toHSLString(changeLighness(roofColor, -0.2));
+        this.roofColor = "#c12000";
+        this.roofColorLight = changeLighness(this.roofColor, 0.2);
+        this.roofColorDark = changeLighness(this.roofColor, -0.2);
 
         this.collisionBoxes = this.buildCollisionBoxes();
     }
@@ -223,6 +222,7 @@ export class Arcade {
         const roofExtraW = roofH * 0.6;
         const roofBottom = r.y + r.h - this.tallness; 
         const roofTop = roofBottom - roofH;
+        ctx.lineWidth = roofH * 0.01;
 
         ctx.fillStyle = this.roofColor;
         ctx.fillRect(r.x, r.y - this.tallness - roofH, r.w, r.h);
@@ -235,6 +235,8 @@ export class Arcade {
         ctx.closePath();
         ctx.fillStyle = this.roofColorLight;
         ctx.fill();
+        ctx.strokeStyle = this.roofColorLight;
+        ctx.stroke();
 
         ctx.beginPath();
         ctx.moveTo(r.x - roofExtraW, roofBottom);
@@ -244,6 +246,8 @@ export class Arcade {
         ctx.closePath();
         ctx.fillStyle = this.roofColorDark;
         ctx.fill();
+        ctx.strokeStyle = this.roofColorDark;
+        ctx.stroke();
 
         ctx.beginPath();
         ctx.moveTo(r.x + r.w + roofExtraW, roofBottom);
@@ -253,6 +257,8 @@ export class Arcade {
         ctx.closePath();
         ctx.fillStyle = this.roofColorDark;
         ctx.fill();
+        ctx.strokeStyle = this.roofColorDark;
+        ctx.stroke();
         // -roof
         ctx.globalAlpha = 1;
     }
