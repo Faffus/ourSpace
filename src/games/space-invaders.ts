@@ -2,13 +2,6 @@ import { IncomingMsg, OutgoingMsg } from '../server';
 import { GameServer, GameClient } from './game';
 import { UserInput } from '../client/user-input';
 
-/*
-  Space Invaders - wave-based, server/client split.
-  Enemy types: Pendulum (bounces walls, smooth sine-Y), Jumper, Diver.
-  All enemies die in 1 hit; difficulty scales through speed and fire rate.
-  Power-ups: LIFE (+2 vite squadra) e SHIELD (scudo team per 4.5s).
-*/
-
 // ── Constants ─────────────────────────────────────────────────────────────
 const PLAYER_W  = 0.12;
 const PLAYER_H  = 0.06;
