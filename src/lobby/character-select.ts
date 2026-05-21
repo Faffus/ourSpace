@@ -25,20 +25,22 @@ export class CharacterSelect {
         this.characterNames = getCharacterNames();
         this.selectedCharacterIndex = 0;
         
-        this.nameInput = new TextInput(userInput, 'nickname');
+        this.nameInput = new TextInput(userInput, 'nickname', 20);
         
         this.leftBtn = new Button('<', userInput, () => {
             this.selectedCharacterIndex = mod(this.selectedCharacterIndex + 1, this.characterNames.length);
+            console.log(this.characterNames[this.selectedCharacterIndex]);
         });
         
         this.rightBtn = new Button('>', userInput, () => {
             this.selectedCharacterIndex = mod(this.selectedCharacterIndex - 1, this.characterNames.length);
+            console.log(this.characterNames[this.selectedCharacterIndex]);
         });
         
         this.okBtn = new Button('ok', userInput, () => {
             if (this.selectionIsDone) return; // bad hack
 
-            const name = this.nameInput.getValue() || '';
+            const name = (this.nameInput.getValue() || '').trim();
             if (name.length) {
                 const character = this.characterNames[this.selectedCharacterIndex];
                 this.onCharacterSelected(name, character);
@@ -50,17 +52,22 @@ export class CharacterSelect {
         this.okBtn.setColors({ main: "#58a515" });
     }
     
+    resetSelection() {
+        this.selectionIsDone = false;
+    }
+
     draw(ctx: CanvasRenderingContext2D) {
         const { screenW, screenH } = this.userInput;
-        const side = Math.min(screenH, screenW);
+        const screenSide = Math.min(screenH, screenW);
+        const halfSide = 100;
 
         ctx.save();
-
         ctx.translate(screenW/2, screenH/2); // centra lo schermo
+        ctx.scale(screenSide/2/halfSide, screenSide/2/halfSide);
 
-        const borderWidth = 20;
+        const borderWidth = 0.05 * halfSide;
         ctx.beginPath();
-        ctx.rect(-side/2, -side/2, side, side);
+        ctx.rect(-halfSide, -halfSide, halfSide*2, halfSide*2);
         ctx.clip();
         ctx.strokeStyle = "#161616";
         ctx.lineWidth = borderWidth;
@@ -70,26 +77,26 @@ export class CharacterSelect {
 
         // personaggio
         const characterName = this.characterNames[this.selectedCharacterIndex];
-        const characterH = side * 0.5;
+        const characterH = halfSide;
         const characterW = characterH * PERSON_W / PERSON_H;
         const drawPerson = getCharacterDrawFunction(characterName);
         drawPerson(ctx, 0, 0, characterW, characterH);
 
-        const padding = borderWidth + 5;
+        const padding = borderWidth * 2;
 
         // input nickname
-        const nameInputW = side * 0.7;
-        const nameInputH = side * 0.1;
-        this.nameInput.draw(ctx, -nameInputW/2, -side/2 + padding, nameInputW, nameInputH);
+        const nameInputW =  1.4 * halfSide;
+        const nameInputH = 0.2 * halfSide;
+        this.nameInput.draw(ctx, -nameInputW/2, -halfSide + padding, nameInputW, nameInputH);
 
         // bottoni
-        const btnWidth = side * 0.1;
-        const btnHeight = side  * 0.4;
-        this.rightBtn.draw(ctx, side/2 - btnWidth - padding, -btnHeight/2, btnWidth, btnHeight);
-        this.leftBtn.draw(ctx, -side/2 + padding, -btnHeight/2, btnWidth, btnHeight);
-        const okBtnW = side * 0.4;
-        const okBtnH = side * 0.1;
-        this.okBtn.draw(ctx, -okBtnW/2, side/2 - okBtnH - padding, okBtnW, okBtnH);
+        const btnWidth = 0.2 * halfSide;
+        const btnHeight = 0.8 * halfSide;
+        this.rightBtn.draw(ctx, halfSide - btnWidth - padding, -btnHeight/2, btnWidth, btnHeight);
+        this.leftBtn.draw(ctx, -halfSide + padding, -btnHeight/2, btnWidth, btnHeight);
+        const okBtnW = 0.8 * halfSide;
+        const okBtnH = 0.2 * halfSide;
+        this.okBtn.draw(ctx, -okBtnW/2, halfSide - okBtnH - padding, okBtnW, okBtnH);
 
         ctx.restore();
     }

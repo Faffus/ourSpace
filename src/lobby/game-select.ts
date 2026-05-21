@@ -24,6 +24,7 @@ export class GameSelect {
         isProposer: boolean;
         proposerName: string;
         gameName: string;
+        gameKey: string;
     } | null = null;
 
     private joinedGame: boolean;
@@ -68,7 +69,8 @@ export class GameSelect {
             if (this.gameProposal !== null) return;
             if (!this.isShowing()) return; // bad hack
 
-            this.hide();
+            if (this.joinedGame) this.exitJoinedGame();
+            else this.hide();
         });
         this.exitBtn.setColors({ main: "#a51515" });
 
@@ -84,7 +86,13 @@ export class GameSelect {
             if (this.gameProposal === null) return;
             if (!this.isShowing()) return; // bad hack
 
-            this.onGameStarted(this.gameProposal.proposalId);
+            const { gameKey, players } = this.gameProposal;
+            const { minPlayers } = GAMES[gameKey];
+            const minPlayersOk = !minPlayers || minPlayers <= Object.keys(players).length
+            if (minPlayersOk)
+                this.onGameStarted(this.gameProposal.proposalId);
+            else
+                alert(`You need at least ${minPlayers} players to start the game`);
         });
     }
     
@@ -107,7 +115,7 @@ export class GameSelect {
         ctx.fill();
         ctx.stroke();
 
-        if (this.gameProposal === null) {
+        if (this.gameProposal === null) { // select game
             const gameKey = this.gameKeys[this.selectedGameKeyIndex];
             const gameName = GAMES[gameKey].name;
             
@@ -129,37 +137,20 @@ export class GameSelect {
             this.exitBtn.draw(ctx, -side*0.4, side/2 - okBtnH - padding, okBtnW, okBtnH);
             this.playBtn.draw(ctx, side*0.1, side/2 - okBtnH - padding, okBtnW, okBtnH);
         }
-        else {
+        else { // joined game waiting for it to start
             const { proposerName, gameName, players } = this.gameProposal;
+            const playersVertPadding = side*0.2;
 
             ctx.fillStyle = "#000";
             ctx.font = "bold 22px Arial";
             ctx.textAlign = "center";
             ctx.textBaseline = "top";
-            ctx.fillText(`${proposerName} wants to play ${gameName}`, 0, -side*0.4);
+            ctx.fillText(`${proposerName} wants to play ${gameName}`, 0, -side/2 + side*0.03);
 
-            // +players
             const playersList = Object.values(players);
-            const playerSpacing = side * 0.2;
-            const startX = -((playersList.length - 1) * playerSpacing) / 2;
-            const playerH = side * 0.15;
-            const playerW = playerH * PERSON_W / PERSON_H;
-            
-            playersList.forEach((player, index) => {
-                const x = startX + index * playerSpacing;
-                const y = -side * 0.2;
-                
-                const drawPerson = getCharacterDrawFunction(player.character);
-                drawPerson(ctx, x, y, playerW, playerH);
-                
-                ctx.fillStyle = "#000";
-                ctx.textAlign = "center";
-                ctx.textBaseline = "top";
-                ctx.fillText(player.name, x, y + playerH/2 + 2);
-            });
-            // -players
+            this.drawPlayers(ctx, playersList, side, -side/2 + playersVertPadding, side/2 - playersVertPadding);
 
-            const padding = borderWidth + 5;
+            const padding = borderWidth + side * 0.03;
             const btnW = side * 0.3;
             const btnH = side * 0.1;
             if (this.gameProposal.isProposer)
@@ -170,13 +161,43 @@ export class GameSelect {
         ctx.restore();
     }
 
+    drawPlayers(ctx: CanvasRenderingContext2D, playersList: Player[], side: number, yTop: number, yBottom: number) {
+        let h = yBottom - yTop;
+        let w = side;
+        let playersPerRow = 2;
+        let numberOfRows = 2;
+        while (playersPerRow * numberOfRows < playersList.length) {
+            if (playersPerRow <= numberOfRows) playersPerRow++;
+            else numberOfRows++;
+        }
+
+        const playerSpacingW = w / playersPerRow;
+        const playerSpacingH = h / numberOfRows;
+        const startX = -w/2 + playerSpacingW/2
+        const playerH = playerSpacingH * 0.8;
+        const playerW = playerH * PERSON_W / PERSON_H;
+        
+        playersList.forEach((player, index) => {
+            const x = startX + playerSpacingW * (index % playersPerRow);
+            const y = yTop + playerSpacingH * Math.floor(index / playersPerRow);
+            
+            const drawPerson = getCharacterDrawFunction(player.character);
+            drawPerson(ctx, x, y, playerW, playerH);
+            
+            ctx.fillStyle = "#000";
+            ctx.textAlign = "center";
+            ctx.textBaseline = "top";
+            ctx.fillText(player.name, x, y + playerH/2 + 2);
+        });
+    }
+
     initGameProposal(proposalId: string, proposerId: string, players: Record<string, Player>, isProposer: boolean, gameKey: string) {
         // const players = { [proposerId]: proposer };
         const proposerName = players[proposerId].name;
         const gameName = GAMES[gameKey].name;
         this.gameProposal = {
             proposalId, proposerId, players, isProposer,
-            proposerName, gameName
+            proposerName, gameName, gameKey
         };
         this.joinedGame = false;
     }
@@ -189,6 +210,10 @@ export class GameSelect {
 
     scratchGameProposal() {
         this.gameProposal = null;
+    }
+
+    exitJoinedGame() {
+        this.joinedGame = false;
     }
 
     show() { this.isVisible = true; }

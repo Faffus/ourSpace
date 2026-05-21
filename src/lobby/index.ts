@@ -1,4 +1,5 @@
-import { PERSON_W, PERSON_H, Player, smoothChange } from '../common';
+import { PERSON_W, PERSON_H, Rectangle, Player, smoothChange, getCollisionSide, EPSILON } from '../common';
+import { Arcade } from './things';
 import { IncomingMsg, OutgoingMsg } from '../server';
 import { Button } from '../client/ui-elements';
 import { GameServer } from '../games/game';
@@ -56,6 +57,11 @@ type ServerGameProposalAcceptedMsg = {
     proposalId: string;
     accepterId: string;
 };
+type ServerGameProposalRefusedMsg = {
+    kind: "gameProposalRefused";
+    proposalId: string;
+    reason: string;
+};
 
 type GameStartedMsg = {
     kind: "gameStarted";
@@ -71,6 +77,7 @@ type LobbyServerMsg =
     | ServerExitMsg
     | ServerGameProposalMsg
     | ServerGameProposalAcceptedMsg
+    | ServerGameProposalRefusedMsg
     | GameStartedMsg
     | GameMsg;
 
@@ -110,10 +117,8 @@ type LobbyClientMsg =
     | GameMsg;
 // -messaggi
 
+const worldW = 10000, worldH = 7000;
 
-const EPSILON = 0.0001;
-
-const worldW = 1000, worldH = 600;
 const worldBounds = {
     top: -worldH/2,
     left: -worldW/2,
@@ -129,6 +134,7 @@ export class LobbyServer {
     public people: Record<string, Person>;
     public outgoingMessages: OutgoingMsg[];
     public games: Record<string, GameServer> = {};
+    public gamesNames: Record<string, string> = {};
     private gameIdCounter: number = 0;
     
     private currentProposal: {
@@ -142,6 +148,14 @@ export class LobbyServer {
     constructor() {
         this.people = {};
         this.outgoingMessages = [];
+
+        setInterval(() => {
+            console.log('\n=====GIOCHI ATTIVI==========================')
+            Object.keys(this.games).forEach(key => {
+                console.log(`${key} -> ${this.gamesNames[key]}`);
+            })
+            console.log('============================================')
+        }, 2000);
     }
 
     clientConnected(id: string) {
@@ -235,8 +249,32 @@ export class LobbyServer {
             else if (payload.kind === "move") {
                 const person = this.people[clientId]
                 if (person) {
-                    person.x = payload.x
-                    person.y = payload.y
+                    let newX = payload.x;
+                    let newY = payload.y;
+
+                    // Collision with buildings — push back if overlapping
+                    const playerRect: Rectangle = {
+                        x: newX - PERSON_W / 2,
+                        y: newY - PERSON_H / 2,
+                        w: PERSON_W,
+                        h: PERSON_H,
+                    };
+
+                    for (const building of buildings) {
+                        for (const box of building.collisionBoxes) {
+                            const side = getCollisionSide(playerRect, box);
+                            if (side !== "none") {
+                                // Push out based on collision side
+                                if (side === "left") newX = box.x - PERSON_W / 2;
+                                else if (side === "right") newX = box.x + box.w + PERSON_W / 2;
+                                else if (side === "top") newY = box.y - PERSON_H / 2;
+                                else if (side === "bottom") newY = box.y + box.h + PERSON_H / 2;
+                            }
+                        }
+                    }
+
+                    person.x = newX;
+                    person.y = newY;
                     updatedPeople[clientId] = person;
                 }
             }
@@ -245,22 +283,40 @@ export class LobbyServer {
             }
             else if (payload.kind === "gameProposalAccept") {
                 if (this.currentProposal && this.currentProposal.proposalId === payload.proposalId) {
-                    this.currentProposal.acceptedPlayerIds.add(clientId);
-                    messages.push({
-                        payload: {
-                            kind: 'gameProposalAccepted',
-                            proposalId: payload.proposalId,
-                            accepterId: clientId
-                        } as ServerGameProposalAcceptedMsg
-                    })
+                    const { acceptedPlayerIds, gameKey } = this.currentProposal;
+                    const { maxPlayers } = GAMES[gameKey];
+                    const maxPlayersOk = !maxPlayers || acceptedPlayerIds.size < maxPlayers;
+                    if (maxPlayersOk) {
+                        this.currentProposal.acceptedPlayerIds.add(clientId);
+                        messages.push({
+                            payload: {
+                                kind: 'gameProposalAccepted',
+                                proposalId: payload.proposalId,
+                                accepterId: clientId
+                            } as ServerGameProposalAcceptedMsg
+                        })
+                    }
+                    else {
+                        messages.push({
+                            payload: {
+                                kind: 'gameProposalRefused',
+                                proposalId: payload.proposalId,
+                                reason: 'full'
+                            } as ServerGameProposalRefusedMsg,
+                            clientId
+                        })
+                    }
                 }
             }
-            else if (payload.kind === "startGame") {
-                // Check if this is the proposer starting a proposed game
-                if (this.currentProposal && this.currentProposal.proposerId === clientId) {
+            else if (payload.kind === "startGame" && this.currentProposal) {
+                const { acceptedPlayerIds, gameKey } = this.currentProposal;
+                const { minPlayers } = GAMES[gameKey];
+                const minPlayersOk = !minPlayers || acceptedPlayerIds.size >= minPlayers;
+
+                if (minPlayersOk && this.currentProposal.proposerId === clientId) {
                     const gameStartedMessage = this.startGameFromProposal();
                     if (gameStartedMessage) messages.push(gameStartedMessage);
-                } 
+                }
             }
         });
 
@@ -298,7 +354,10 @@ export class LobbyServer {
                 });
             });
             
-            if (game.isFinished()) delete this.games[gameId];
+            if (game.isFinished()) {
+                delete this.games[gameId];
+                delete this.gamesNames[gameId];
+            }
         });
         // -game
 
@@ -355,6 +414,7 @@ export class LobbyServer {
 
         game.init(players);
         this.games[gameId] = game;
+        this.gamesNames[gameId] = gameKey;
         
         this.currentProposal = null;
         
@@ -381,6 +441,10 @@ type ClientPerson = Person & {
     xTarget: number;
     yTarget: number;
 };
+
+const buildings: Arcade[] = [
+    new Arcade({ x: 200, y: -1000, w: 1200, h: 800 }, 50),
+];
 
 export class LobbyClient {
     public userInput: any;
@@ -434,7 +498,7 @@ export class LobbyClient {
                 proposalId
             });
         };
-        this.gameSelect = new GameSelect( userInput,
+        this.gameSelect = new GameSelect(userInput,
             onGameSelected, onGameJoined, onGameStarted);
 
         this.gamesBtn = new Button('Games', userInput, () => {
@@ -463,6 +527,26 @@ export class LobbyClient {
         // gestione movimento
         me.xTarget = me.xTarget + moveDirectionX * dt * PERSON_SPEED;
         me.yTarget = me.yTarget + moveDirectionY * dt * PERSON_SPEED;
+
+        // collisione con gli edifici
+        const clientPlayerRect: Rectangle = {
+            x: me.xTarget - PERSON_W / 2,
+            y: me.yTarget - PERSON_H / 2,
+            w: PERSON_W,
+            h: PERSON_H,
+        };
+        for (const building of buildings) {
+            for (const box of building.collisionBoxes) {
+                const side = getCollisionSide(clientPlayerRect, box);
+                if (side !== "none") {
+                    if (side === "left") me.xTarget = box.x - PERSON_W / 2;
+                    else if (side === "right") me.xTarget = box.x + box.w + PERSON_W / 2;
+                    else if (side === "top") me.yTarget = box.y - PERSON_H / 2;
+                    else if (side === "bottom") me.yTarget = box.y + box.h + PERSON_H / 2;
+                }
+            }
+            building.update(clientPlayerRect);
+        }
 
         // controllo che il giocatore non esca dallo spazio di gioco
         if (me.yTarget - PERSON_H/2 < worldBounds.top) me.yTarget = worldBounds.top + PERSON_H/2 + EPSILON;
@@ -493,6 +577,11 @@ export class LobbyClient {
         ctx.fillStyle = "#58a515";
         ctx.fill();
 
+        // disegna l'interno degli edifici
+        for (const building of buildings) {
+            building.draw(ctx, dt);
+        }
+
         // sposta le persone e disegnale
         Object.values(this.people).forEach((person) => {
             if (person.xTarget)
@@ -504,6 +593,11 @@ export class LobbyClient {
             drawPerson(ctx, person.x, person.y, PERSON_W, PERSON_H, );
             drawPersonName(ctx, person);
         });
+
+        // disegna l'esterno degli edifici
+        for (const building of buildings) {
+            building.drawFront(ctx);
+        }
 
         ctx.restore();
         
@@ -536,6 +630,12 @@ export class LobbyClient {
             const accepter = this.people[message.accepterId];
             this.gameSelect.addPlayerToProposal(proposalId, accepterId, accepter);
         }
+        else if (message.kind === "gameProposalRefused") {
+            const { reason } = message;
+            if (reason === 'full') alert("Can't join, game is full");
+            else alert("Couldn't join game");
+            this.gameSelect.exitJoinedGame();
+        }
         else if (message.kind === "game") {
             if (this.currentGame && message.gameId === this.currentGameId) {
                 this.currentGame.handleMessage(message.data);
@@ -560,6 +660,7 @@ export class LobbyClient {
         }
         else if (message.kind === "nameIsTaken") {
             alert("nickname is already taken");
+            this.characterSelect.resetSelection();
         }
         else if (message.kind === "update") {
             const updateMsg = message;

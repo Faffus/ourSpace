@@ -3,833 +3,846 @@ import { GameServer, GameClient } from './game';
 import { UserInput } from '../client/user-input';
 
 /*
-  Space Invaders - Server/Client split (simple, predictable enemy patterns)
-  Server: SpaceServer extends GameServer - authoritative state, tick()
-  Client: SpaceClient extends GameClient - local input, draw(), flushMessages()
-
-  This file focuses on: Player heat/shield logic, Projectile handling, and
-  three enemy behaviours: Pendulum, Jumper, Diver.
+  Space Invaders - wave-based, server/client split.
+  Enemy types: Pendulum (bounces walls, smooth sine-Y), Jumper, Diver.
+  All enemies die in 1 hit; difficulty scales through speed and fire rate.
+  Power-ups: LIFE (+2 vite squadra) e SHIELD (scudo team per 4.5s).
 */
 
-// World & entity constants (normalized coordinates: -1..1)
-const PLAYER_W = 0.12;
-const PLAYER_H = 0.06;
-const PLAYER_SPEED = 1.6; // units/sec for local smoothing
+// ── Constants ─────────────────────────────────────────────────────────────
+const PLAYER_W  = 0.12;
+const PLAYER_H  = 0.06;
+const PLAYER_SPEED = 1.6;
 
-const PROJ_W = 0.01;
-const PROJ_H = 0.03;
-const PLAYER_PROJECTILE_SPEED = -1.8; // negative = up
-// Base enemy projectile speed; will be scaled by `difficulty` per wave
-const ENEMY_PROJECTILE_SPEED = 1.9;
+const PROJ_W = 0.015;
+const PROJ_H = 0.04;
+const PLAYER_PROJ_SPEED = -2.0;
+const ENEMY_PROJ_SPEED  =  1.6;
 
-// Make sustained firing slightly more costly for players (harder to spam)
-const HEAT_PER_SHOT = 12;
-// Increase dissipation so players recover heat faster between bursts
-const HEAT_DISSIPATION_RATE = 22; // units/sec
-// Shorter overheat penalty so gameplay feels snappier
-const OVERHEAT_DURATION_MS = 1500;
-// Shrink shields a bit and increase cooldown to make them less dominant
-const SHIELD_DURATION_MS = 900;
-// Reduced cooldown so shields are more usable during play
+const FIRE_COOLDOWN_MS   = 160;
+const HEAT_PER_SHOT      = 14;
+const HEAT_DISSIPATION   = 28;
+const OVERHEAT_MS        = 1200;
+const SHIELD_MS          = 900;
 const SHIELD_COOLDOWN_MS = 3000;
 
-// Maximum number of active players allowed in a game instance
+const WAVE_TRANSITION_MS = 3000;
 const MAX_ACTIVE_PLAYERS = 2;
+const WAVE_START_FIRE_DELAY_MS = 1500;  // ritardo prima che i nemici incomincino a sparare
 
-type EnemyType = 'PENDULUM' | 'JUMPER' | 'DIVER';
+// ── Power-up constants ─────────────────────────────────────────────────────
+const POWERUP_DROP_CHANCE = 0.12;   // 12% di probabilità al kill
+const POWERUP_W           = 0.07;
+const POWERUP_H           = 0.07;
+const POWERUP_VY          = 0.38;   // velocità di caduta (unità/sec)
+const POWERUP_LIFE_BONUS  = 2;      // vite aggiunte dal power-up LIFE
+const POWERUP_SHIELD_MS   = 4500;   // durata scudo team dal power-up SHIELD
+
+// ── Types ──────────────────────────────────────────────────────────────────
+type EnemyType   = 'PENDULUM' | 'JUMPER' | 'DIVER';
+type PowerUpType = 'LIFE' | 'SHIELD';
 
 type ProjectileState = {
-  x: number; y: number; vx: number; vy: number; w: number; h: number; owner: 'player' | 'enemy'; ownerId?: string; alive?: boolean;
-}
+  x: number; y: number; vx: number; vy: number; w: number; h: number;
+  owner: 'player' | 'enemy'; ownerId?: string; alive?: boolean;
+};
 
 type EnemyState = {
-  id: number;
-  type: EnemyType;
-  x: number; y: number; w: number; h: number; vx?: number; vy?: number;
-  // pendulum
-  baseY?: number; amplitude?: number; frequency?: number; phase?: number; lastPeakFireAt?: number;
-  // jumper
-  lastJumpAt?: number; direction?: number; jumpIntervalMs?: number;
-  // diver
-  idleStartAt?: number; diving?: boolean; diveStartDelayMs?: number; diveSpeed?: number; visible?: boolean; lastBlinkAt?: number; blinkMs?: number;
-  hp?: number;
+  id: number; type: EnemyType;
+  x: number; y: number; w: number; h: number;
   alive?: boolean;
-}
+  // PENDULUM
+  vx?: number; baseY?: number; amplitude?: number;
+  frequency?: number; phase?: number; t?: number; lastFireAt?: number;
+  // JUMPER
+  lastJumpAt?: number; direction?: number; jumpIntervalMs?: number; lastJumpFireAt?: number;
+  // DIVER
+  vy?: number; diving?: boolean; idleStartAt?: number; diveStartDelayMs?: number;
+  diveSpeed?: number; visible?: boolean; lastBlinkAt?: number; blinkMs?: number;
+};
+
+type PowerUpState = {
+  x: number; y: number; vy: number; w: number; h: number;
+  type: PowerUpType; alive?: boolean;
+};
 
 type PlayerRuntimeState = {
-  heat: number;
-  isOverheated: boolean;
-  overheatedUntil: number;
-  lastShotAt: number;
-  shieldExpiresAt: number;
-  shieldCooldownUntil: number;
-  // powerups, not fully implemented here but reserved
-  powerups?: Record<string, number>;
+  heat: number; isOverheated: boolean; overheatedUntil: number;
+  lastShotAt: number; shieldExpiresAt: number; shieldCooldownUntil: number;
+};
+
+// ── Helpers ────────────────────────────────────────────────────────────────
+function aabb(a: {x:number;y:number;w:number;h:number}, b: {x:number;y:number;w:number;h:number}) {
+  return !(a.x+a.w < b.x || a.x > b.x+b.w || a.y+a.h < b.y || a.y > b.y+b.h);
 }
 
-function aabbCollision(a: {x:number;y:number;w:number;h:number}, b: {x:number;y:number;w:number;h:number}){
-  return !(a.x + a.w < b.x || a.x > b.x + b.w || a.y + a.h < b.y || a.y > b.y + b.h);
+function lerp(a: number, b: number, t: number) { return a + (b-a)*t; }
+
+function randomType(): EnemyType {
+  return (['PENDULUM','JUMPER','DIVER'] as EnemyType[])[Math.floor(Math.random()*3)];
 }
 
-// Linear interpolation helper for smoothing positions
-function lerp(a: number, b: number, t: number){
-  return a + (b - a) * t;
-}
-
-/* =====================
+/* =====================================================================
    SpaceServer
-   ===================== */
+   ===================================================================== */
 export class SpaceServer extends GameServer {
-  private players: Record<string, any> = {};
+  private players:     Record<string, any> = {};
   private playerState: Record<string, PlayerRuntimeState> = {};
   private projectiles: ProjectileState[] = [];
-  private enemies: EnemyState[] = [];
-  private respawnQueue: { type?: EnemyType; respawnAt: number }[] = [];
-  private nextEnemyId: number = 1;
-  private waveNumber: number = 1;
-  // Increase starting lives per request
-  private lives: number = 5;
-  private teamScore: number = 0;
-  // Track which player IDs are active in the current game (others are spectators)
-  private activePlayerIds: Set<string> = new Set();
+  private enemies:     EnemyState[]      = [];
+  private powerUps:    PowerUpState[]    = [];   // ← power-up attivi
+  private nextId:      number = 1;
+  private waveNumber:  number = 1;
+  private lives:       number = 5;
+  private teamScore:   number = 0;
+  private inTransition:        boolean = false;
+  private waveTransitionUntil: number  = 0;
+  private started:            boolean = false;
+  private waveStartTime:      number  = 0;  // timestamp inizio ondata per ritardare il firing
 
+  // ── init ──────────────────────────────────────────────────────────────
   init(players) {
-    this.players = players;
+    this.players     = players;
     this.projectiles = [];
-    this.enemies = [];
-    // start with 5 lives per request
-    this.lives = 5;
-    this.teamScore = 0;
+    this.enemies     = [];
+    this.powerUps    = [];   // ← reset power-up
+    this.lives       = 5;
+    this.teamScore   = 0;
+    this.waveNumber  = 1;
+    this.inTransition        = false;
+    this.waveTransitionUntil = 0;
+    this.started            = false;
 
-    // Initialize player positions and runtime state for up to MAX_ACTIVE_PLAYERS.
-    // Additional connected clients are marked as spectators and kept out of
-    // authoritative gameplay (they won't affect physics or receive input handling).
-    this.activePlayerIds = new Set();
     const ids = Object.keys(players || {});
     let assigned = 0;
     for (const id of ids) {
       const p = players[id];
       if (assigned < MAX_ACTIVE_PLAYERS) {
-        // active player
-        this.activePlayerIds.add(id);
-        p.x = (assigned % 2 === 0) ? -0.4 : 0.4; // left / right start
-        p.y = 0.9; // bottom area
-        p.w = PLAYER_W; p.h = PLAYER_H;
-        p.color = (assigned % 2 === 0) ? '#88ff88' : '#88ccff';
-        p.score = 0;
+        p.x = assigned === 0 ? -0.4 : 0.4;
+        p.y = 0.9; p.w = PLAYER_W; p.h = PLAYER_H;
+        p.color = assigned === 0 ? '#88ff88' : '#88ccff';
+        p.score = 0; p.isSpectator = false;
         this.playerState[id] = {
-          heat: 0,
-          isOverheated: false,
-          overheatedUntil: 0,
-          lastShotAt: 0,
-          shieldExpiresAt: 0,
-          shieldCooldownUntil: 0,
-          powerups: {}
+          heat: 0, isOverheated: false, overheatedUntil: 0,
+          lastShotAt: 0, shieldExpiresAt: 0, shieldCooldownUntil: 0,
         };
-        p.isSpectator = false;
-        assigned += 1;
+        assigned++;
       } else {
-        // spectator: mark and move off-screen so client won't draw them inside the playfield
         p.isSpectator = true;
         p.x = 0; p.y = 2; p.w = PLAYER_W; p.h = PLAYER_H;
-        p.color = '#666666';
-        p.score = p.score || 0;
+        p.color = '#666666'; p.score = p.score || 0;
       }
     }
-
-      // spawn an initial wave (types chosen randomly)
-      this.waveNumber = 1;
-      this.spawnInitialWave(3, 7);
   }
 
-    private spawnInitialWave(rows: number, cols: number){
-      // increase wave density slowly as waves progress
-      // increase density slightly faster so more enemies appear throughout the game
-      const extra = Math.floor((this.waveNumber - 1) / 1);
-      const actualRows = Math.min(8, rows + extra + 1);
-      const actualCols = Math.min(12, cols + extra + 1);
-      const startX = -0.9;
-      const spacingX = 1.8 / Math.max(6, actualCols - 1);
-      const startY = -0.8;
-      const spacingY = 0.14;
+  // ── spawnWave ─────────────────────────────────────────────────────────
+  private spawnWave() {
+    this.waveStartTime = Date.now();  // ← reset timer al inizio della ondata
+    const diff  = Math.pow(1.15, this.waveNumber - 1);
+    const extra = Math.floor((this.waveNumber - 1) / 2);
+    const rows  = Math.min(6, 3 + extra);
+    const cols  = Math.min(10, 6 + extra);
 
-      const difficulty = Math.pow(1.18, Math.max(0, this.waveNumber - 1));
-      const baseHp = 1 + Math.floor((this.waveNumber - 1) / 2);
+    const startX   = -0.85;
+    const spacingX = 1.7 / Math.max(cols - 1, 1);
+    const startY   = -0.82;
+    const spacingY = 0.13;
 
-      for(let r=0;r<actualRows;r++){
-        for(let c=0;c<actualCols;c++){
-          const type = this.randomEnemyType();
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        const type = randomType();
+        const ex = startX + c * spacingX;
+        const ey = startY + r * spacingY;
+        const e: EnemyState = { id: this.nextId++, type, x: ex, y: ey, w: 0.10, h: 0.06, alive: true };
 
-          const ex = startX + c * spacingX + (Math.random()*0.02 - 0.01);
-          const ey = startY + r * spacingY + (Math.random()*0.02 - 0.01);
-          const e: EnemyState = {
-            id: this.nextEnemyId++,
-            type,
-            x: ex,
-            y: ey,
-            w: 0.10,
-            h: 0.06,
-            hp: baseHp,
-            alive: true
-          };
-
-          if (type === 'PENDULUM'){
-            e.vx = (0.25 + Math.random()*0.2) * (Math.random() < 0.5 ? 1 : -1) * difficulty;
-            e.baseY = ey;
-            e.amplitude = (0.08 + Math.random()*0.06) * (1 + 0.08*(this.waveNumber-1));
-            e.frequency = (2 + Math.random()*2) * (1 + 0.06*(this.waveNumber-1));
-            e.phase = Math.random()*Math.PI*2;
-            e.lastPeakFireAt = 0;
-          } else if (type === 'JUMPER'){
-            e.jumpIntervalMs = Math.max(350, Math.floor(1200 / difficulty) + Math.floor(Math.random()*400));
-            e.lastJumpAt = Date.now() + Math.random()*e.jumpIntervalMs;
-            e.direction = Math.random() < 0.5 ? -1 : 1;
-          } else if (type === 'DIVER'){
-            e.diving = false;
-            e.idleStartAt = 0;
-            e.diveStartDelayMs = Math.max(600, Math.floor(2200 / difficulty) + Math.floor(Math.random()*800));
-            e.blinkMs = 150 + Math.floor(Math.random()*200);
-            e.lastBlinkAt = Date.now();
-            e.visible = true;
-            e.diveSpeed = (3.2 + Math.random()*1.6) * difficulty;
-          }
-
-          this.enemies.push(e);
+        if (type === 'PENDULUM') {
+          e.vx        = (0.18 + Math.random() * 0.15) * diff * (Math.random() < 0.5 ? 1 : -1);
+          e.baseY     = ey;
+          e.amplitude = 0.05 + Math.random() * 0.05;
+          e.frequency = 1.5 + Math.random() * 1.5;
+          e.phase     = Math.random() * Math.PI * 2;
+          e.t         = 0;
+          e.lastFireAt = 0;
+        } else if (type === 'JUMPER') {
+          e.jumpIntervalMs = Math.max(300, Math.floor(1100 / diff) + Math.floor(Math.random() * 300));
+          e.lastJumpAt     = Date.now() + Math.random() * e.jumpIntervalMs;
+          e.lastJumpFireAt = 0;
+          e.direction      = Math.random() < 0.5 ? -1 : 1;
+        } else { // DIVER
+          e.diving           = false;
+          e.idleStartAt      = 0;
+          e.diveStartDelayMs = Math.max(800, Math.floor(2500 / diff) + Math.floor(Math.random() * 800));
+          e.blinkMs          = 200 + Math.floor(Math.random() * 150);
+          e.lastBlinkAt      = Date.now();
+          e.visible          = true;
+          e.diveSpeed        = (2.8 + Math.random() * 1.2) * diff;
         }
+        this.enemies.push(e);
       }
     }
+  }
 
-  tick(incomingMessages: IncomingMsg[], dt: number): OutgoingMsg[] {
+  private startGame() {
+    if (this.started) return;
+    this.started = true;
+    this.spawnWave();
+  }
+
+  // ── tick ──────────────────────────────────────────────────────────────
+  tick(incoming: IncomingMsg[], dt: number): OutgoingMsg[] {
     const now = Date.now();
 
-    // Process incoming messages
-    incomingMessages.forEach(m => {
-      const id = m.clientId;
-      const payload = m.payload;
+    // Wave transition: wait, then spawn next wave
+    if (this.inTransition) {
+      if (now >= this.waveTransitionUntil) {
+        this.inTransition = false;
+        this.waveNumber++;
+        this.projectiles = this.projectiles.filter(p => p.owner === 'player');
+        this.spawnWave();
+      }
+      this.attachRuntimeState(now);
+      return [{ payload: this.snapshot(now) }];
+    }
+
+    // Player inputs
+    for (const m of incoming) {
+      const { clientId: id, payload } = m;
       const p = this.players[id];
-      if (!p) return;
-      // ignore inputs from spectators
-      if (p.isSpectator) return;
+      if (!p || p.isSpectator) continue;
+      if (!this.started && payload.kind === 'start') this.startGame();
+      if (!this.started) continue;
+      if (payload.kind === 'move')   this.players[id].x = Math.max(-1, Math.min(1-PLAYER_W, payload.x));
+      if (payload.kind === 'fire')   this.handleFire(id, now);
+      if (payload.kind === 'shield') this.handleShield(id, now);
+    }
 
-      if (payload.kind === 'move'){
-        // authoritative player x from client
-        this.players[id].x = Math.max(-1, Math.min(1 - PLAYER_W, payload.x));
-      } else if (payload.kind === 'fire'){
-        this.handleFire(id, now);
-      } else if (payload.kind === 'shield'){
-        this.handleShield(id, now);
-      }
-    });
+    if (!this.started) {
+      this.attachRuntimeState(now);
+      return [{ payload: this.snapshot(now) }];
+    }
 
-    // Update player runtime state (heat dissipation & overheated recovery)
-    Object.keys(this.players).forEach(id => {
+    // Heat dissipation
+    for (const id of Object.keys(this.players)) {
       const st = this.playerState[id];
-      if (!st) return;
-      // if last shot not recent, dissipate heat
-      const firingRecently = (now - st.lastShotAt) < 250;
-      if (!firingRecently) st.heat = Math.max(0, st.heat - HEAT_DISSIPATION_RATE * dt);
-      if (st.isOverheated && now >= st.overheatedUntil){
-        st.isOverheated = false;
-        st.heat = Math.min(100, 60);
-      }
-    });
+      if (!st) continue;
+      if (now - st.lastShotAt > 200) st.heat = Math.max(0, st.heat - HEAT_DISSIPATION * dt);
+      if (st.isOverheated && now >= st.overheatedUntil) { st.isOverheated = false; st.heat = 50; }
+    }
 
     // Update enemies
     this.updateEnemies(dt, now);
 
-    // Update projectiles (move)
+    // Move projectiles
     for (const pr of this.projectiles) {
       if (!pr.alive) continue;
       pr.x += pr.vx * dt;
       pr.y += pr.vy * dt;
     }
 
-    // Collision detection with swept AABB to prevent fast projectiles from
-    // passing through thin enemies between ticks. This keeps logic simple
-    // and follows the same straightforward style used in multi-pong.
+    // ── Move power-ups verso il basso ──────────────────────────────────
+    for (const pu of this.powerUps) {
+      if (!pu.alive) continue;
+      pu.y += pu.vy * dt;
+    }
+
+    // Collisions (proiettili + power-up)
+    this.resolveCollisions(now);
+
+    // ── Collisione power-up con giocatori ─────────────────────────────
+    for (const pu of this.powerUps) {
+      if (!pu.alive) continue;
+      for (const pid of Object.keys(this.players)) {
+        const p  = this.players[pid];
+        const st = this.playerState[pid];
+        if (!p || !st || p.isSpectator) continue;
+        if (aabb(pu, { x: p.x, y: p.y, w: PLAYER_W, h: PLAYER_H })) {
+          pu.alive = false;
+          if (pu.type === 'LIFE') {
+            this.lives += POWERUP_LIFE_BONUS;
+          } else { // SHIELD: attiva lo scudo su tutti i giocatori attivi
+            for (const sid of Object.keys(this.playerState)) {
+              this.playerState[sid].shieldExpiresAt = now + POWERUP_SHIELD_MS;
+            }
+          }
+          break;
+        }
+      }
+    }
+
+    // Clean up
+    this.projectiles = this.projectiles.filter(p => p.alive !== false && p.y > -1.5 && p.y < 1.5);
+    this.enemies     = this.enemies.filter(e => e.alive !== false);
+    this.powerUps    = this.powerUps.filter(pu => pu.alive !== false && pu.y < 1.5);  // ← rimuovi fuori schermo
+
+    // Wave cleared?
+    if (this.enemies.length === 0) {
+      this.inTransition        = true;
+      this.waveTransitionUntil = now + WAVE_TRANSITION_MS;
+    }
+
+    this.attachRuntimeState(now);
+    return [{ payload: this.snapshot(now) }];
+  }
+
+  // ── resolveCollisions ─────────────────────────────────────────────────
+  private resolveCollisions(now: number) {
     for (let i = this.projectiles.length - 1; i >= 0; i--) {
       const pr = this.projectiles[i];
       if (!pr.alive) continue;
 
-      const prevX = pr.x - pr.vx * dt;
-      const prevY = pr.y - pr.vy * dt;
-      const left = Math.min(prevX - pr.w/2, pr.x - pr.w/2);
-      const top = Math.min(prevY - pr.h/2, pr.y - pr.h/2);
-      const right = Math.max(prevX + pr.w/2, pr.x + pr.w/2);
-      const bottom = Math.max(prevY + pr.h/2, pr.y + pr.h/2);
-      const swept = { x: left, y: top, w: right - left, h: bottom - top };
-
       if (pr.owner === 'player') {
+        const bx = pr.x - pr.w;
+        const by = pr.y - pr.h / 2;
+        const bw = pr.w * 2;
+        const bh = pr.h;
         for (let j = this.enemies.length - 1; j >= 0; j--) {
           const en = this.enemies[j];
           if (!en.alive) continue;
-          if (aabbCollision(swept, { x: en.x, y: en.y, w: en.w, h: en.h })) {
+          if (aabb({ x: bx, y: by, w: bw, h: bh }, { x: en.x, y: en.y, w: en.w, h: en.h })) {
             pr.alive = false;
-            // decrement enemy HP; only kill when hp <= 0 (makes enemies require multiple hits)
-            en.hp = (en.hp || 1) - 1;
-            if (en.hp <= 0) {
-              en.alive = false;
-              // award score to shooter if known (per-player stat)
-              if ((pr as any).ownerId && this.players[(pr as any).ownerId]) {
-                const shooter = this.players[(pr as any).ownerId];
-                shooter.score = (shooter.score || 0) + 1;
-              }
-              // increment common/team score
-              this.teamScore += 1;
-              // schedule a respawn (type chosen randomly at respawn time) — respawn faster on later waves
-              const respawnDelay = Math.max(700, 1500 - (this.waveNumber - 1) * 150) + Math.floor(Math.random() * 1400);
-              this.respawnQueue.push({ respawnAt: now + respawnDelay });
+            en.alive = false;
+            const ownerId = (pr as any).ownerId;
+            if (ownerId && this.players[ownerId])
+              this.players[ownerId].score = (this.players[ownerId].score || 0) + 1;
+            this.teamScore++;
+
+            // ── Drop power-up casuale ──────────────────────────────────
+            if (Math.random() < POWERUP_DROP_CHANCE) {
+              const puType: PowerUpType = Math.random() < 0.5 ? 'LIFE' : 'SHIELD';
+              this.powerUps.push({
+                x:     en.x + (en.w - POWERUP_W) / 2,  // centrato sul nemico
+                y:     en.y,
+                vy:    POWERUP_VY,
+                w:     POWERUP_W,
+                h:     POWERUP_H,
+                type:  puType,
+                alive: true,
+              });
             }
+
             break;
           }
         }
       } else {
-        // enemy projectile -> players & shields
+        // Enemy bullet → players
         for (const pid of Object.keys(this.players)) {
-          const p = this.players[pid];
+          const p  = this.players[pid];
           const st = this.playerState[pid];
-          if (!p || !st) continue;
-          const shieldActive = st.shieldExpiresAt > now;
-          // shield is rectangle in front of player
-          if (shieldActive) {
+          if (!p || !st || p.isSpectator) continue;
+          if (st.shieldExpiresAt > now) {
             const sw = PLAYER_W * 1.8;
             const sx = p.x + (PLAYER_W - sw) / 2;
-            const sy = p.y - 0.05;
-            if (aabbCollision(swept, { x: sx, y: sy, w: sw, h: 0.06 })) { pr.alive = false; break; }
+            if (aabb({ x: pr.x - pr.w/2, y: pr.y - pr.h/2, w: pr.w, h: pr.h },
+                     { x: sx, y: p.y - 0.05, w: sw, h: 0.06 })) { pr.alive = false; break; }
           }
-          if (aabbCollision(swept, { x: p.x, y: p.y, w: PLAYER_W, h: PLAYER_H })) { pr.alive = false; p.alive = false; this.lives -= 1; break; }
+          if (aabb({ x: pr.x - pr.w/2, y: pr.y - pr.h/2, w: pr.w, h: pr.h },
+                   { x: p.x, y: p.y, w: PLAYER_W, h: PLAYER_H })) {
+            pr.alive = false; this.lives--; break;
+          }
         }
-      }
-    }
-
-    // Clean up dead projectiles and enemies
-    this.projectiles = this.projectiles.filter(p => p.alive !== false && p.y > -2 && p.y < 2);
-    this.enemies = this.enemies.filter(e => e.alive !== false);
-
-    // Process pending respawns
-    if (this.respawnQueue.length > 0) {
-      const due = this.respawnQueue.filter(r => r.respawnAt <= now);
-      for (const r of due) {
-        const t = r.type || this.randomEnemyType();
-        // spawn one primary enemy
-        this.enemies.push(this.generateEnemy(t));
-        // 50% chance to spawn a secondary extra enemy to increase pressure
-        if (Math.random() < 0.5) this.enemies.push(this.generateEnemy(Math.random() < 0.6 ? t : this.randomEnemyType()));
-      }
-      this.respawnQueue = this.respawnQueue.filter(r => r.respawnAt > now);
-    }
-
-    // If no enemies left and no pending respawns, start next wave with higher difficulty
-    if (this.enemies.length === 0 && this.respawnQueue.length === 0) {
-      this.waveNumber += 1;
-      this.spawnInitialWave(3, 7);
-    }
-
-    // Attach runtime state (heat/shield) to players so clients can render HUDs
-      Object.keys(this.players).forEach(pid => {
-        const st = this.playerState[pid];
-        if (st) {
-          this.players[pid].runtimeState = {
-            heat: st.heat,
-            isOverheated: st.isOverheated,
-            shieldActive: st.shieldExpiresAt > now,
-            shieldCooldownMs: Math.max(0, st.shieldCooldownUntil - now),
-            shieldTimeLeftMs: Math.max(0, st.shieldExpiresAt - now)
-          };
-        } else {
-          this.players[pid].runtimeState = null;
-        }
-      });
-
-      // Broadcast state
-      return [{ payload: { players: this.players, enemies: this.enemies, projectiles: this.projectiles, lives: this.lives, teamScore: this.teamScore } }];
-  }
-
-  private handleFire(clientId: string, now: number){
-    const p = this.players[clientId];
-    const st = this.playerState[clientId];
-    if (!p || !st) return;
-    if (st.isOverheated && now < st.overheatedUntil) return;
-    if (now - st.lastShotAt < 40) return; // fire rate limit (shorter cooldown)
-
-    st.lastShotAt = now;
-    // heat handling
-    st.heat += HEAT_PER_SHOT;
-    if (st.heat >= 100){ st.heat = 100; st.isOverheated = true; st.overheatedUntil = now + OVERHEAT_DURATION_MS; }
-
-    // spawn player projectile from player's center
-    const proj: ProjectileState = {
-      x: p.x + PLAYER_W/2,
-      y: p.y,
-      vx: 0,
-      vy: PLAYER_PROJECTILE_SPEED,
-      w: PROJ_W,
-      h: PROJ_H,
-      owner: 'player', ownerId: clientId,
-      alive: true
-    };
-    this.projectiles.push(proj);
-
-    // immediate collision check in case player fires into a very-close enemy
-    for (let j = this.enemies.length - 1; j >= 0; j--) {
-      const en = this.enemies[j];
-      if (!en.alive) continue;
-      const prRect = { x: proj.x - proj.w/2, y: proj.y - proj.h/2, w: proj.w, h: proj.h };
-      if (aabbCollision(prRect, { x: en.x, y: en.y, w: en.w, h: en.h })) {
-        proj.alive = false;
-        en.hp = (en.hp || 1) - 1;
-        if (en.hp <= 0) {
-          en.alive = false;
-          const shooter = this.players[clientId];
-          if (shooter) shooter.score = (shooter.score || 0) + 1;
-          // increment common/team score
-          this.teamScore += 1;
-          const respawnDelay = Math.max(700, 1500 - (this.waveNumber - 1) * 150) + Math.floor(Math.random() * 1400);
-          this.respawnQueue.push({ respawnAt: now + respawnDelay });
-        }
-        break;
       }
     }
   }
 
-  private handleShield(clientId: string, now: number){
-    const st = this.playerState[clientId];
-    if (!st) return;
-    if (now < st.shieldCooldownUntil) return; // on cooldown
-    st.shieldExpiresAt = now + SHIELD_DURATION_MS;
-    st.shieldCooldownUntil = now + SHIELD_COOLDOWN_MS;
-  }
-
-  private updateEnemies(dt: number, now: number){
-    const bounds = { left: -1, right: 1 };
-    const difficulty = Math.pow(1.18, Math.max(0, this.waveNumber - 1));
-
-    for(const e of this.enemies){
+  // ── updateEnemies ─────────────────────────────────────────────────────
+  private updateEnemies(dt: number, now: number) {
+    const diff = Math.pow(1.15, this.waveNumber - 1);    const canEnemiesFire = now - this.waveStartTime >= WAVE_START_FIRE_DELAY_MS;
+    for (const e of this.enemies) {
       if (!e.alive) continue;
-      switch(e.type){
-        case 'PENDULUM':
+
+      switch (e.type) {
+        case 'PENDULUM': {
           e.x += (e.vx || 0) * dt;
-          e.y = (e.baseY || 0) + (e.amplitude || 0) * Math.sin((e.frequency||1) * e.x + (e.phase||0));
-          // fire at peaks
-          const sinVal = Math.sin((e.frequency||1) * e.x + (e.phase||0));
-          const peakCooldownMs = Math.max(120, Math.floor(700 / difficulty));
-          if (sinVal > 0.9 && (!e.lastPeakFireAt || now - e.lastPeakFireAt > peakCooldownMs)){
-            e.lastPeakFireAt = now;
-            // main downward shot (scale speed by difficulty)
-            this.projectiles.push({ x: e.x + e.w/2, y: e.y + e.h, vx: 0, vy: ENEMY_PROJECTILE_SPEED * difficulty, w: PROJ_W, h: PROJ_H, owner: 'enemy', alive: true });
-            // increase chance of spread shots with difficulty (clamped)
-            const spreadChance = Math.min(0.8, 0.35 * difficulty);
-            if (Math.random() < spreadChance) {
-              this.projectiles.push({ x: e.x + e.w/2 + 0.03, y: e.y + e.h, vx: 0.14 * difficulty, vy: ENEMY_PROJECTILE_SPEED * difficulty, w: PROJ_W, h: PROJ_H, owner: 'enemy', alive: true });
-              this.projectiles.push({ x: e.x + e.w/2 - 0.03, y: e.y + e.h, vx: -0.14 * difficulty, vy: ENEMY_PROJECTILE_SPEED * difficulty, w: PROJ_W, h: PROJ_H, owner: 'enemy', alive: true });
-            }
-            // occasional extra straight shot on higher difficulties
-            if (Math.random() < Math.min(0.35, 0.08 * difficulty)) {
-              this.projectiles.push({ x: e.x + e.w/2, y: e.y + e.h, vx: 0, vy: ENEMY_PROJECTILE_SPEED * difficulty * 1.05, w: PROJ_W, h: PROJ_H, owner: 'enemy', alive: true });
-            }
-          }
-          // wrap horizontally
-          if (e.x < bounds.left - 0.2) e.x = bounds.right + 0.2;
-          if (e.x > bounds.right + 0.2) e.x = bounds.left - 0.2;
-          break;
+          if (e.x < -0.95)       { e.x = -0.95;       e.vx =  Math.abs(e.vx || 0); }
+          if (e.x + e.w > 0.95)  { e.x = 0.95 - e.w;  e.vx = -Math.abs(e.vx || 0); }
 
-        case 'JUMPER':
-          if (!e.lastJumpAt) e.lastJumpAt = now;
-          if (now - e.lastJumpAt >= (e.jumpIntervalMs || 1200)){
-            e.lastJumpAt = now;
-            const step = 0.22 * (e.direction || 1);
-            const target = (e.x || 0) + step;
-            if (target < bounds.left || target + e.w > bounds.right){
-              e.direction = -(e.direction || 1);
-              e.y += 0.06;
-            } else {
-              e.x = target;
-            }
-          }
-          break;
+          e.t = (e.t || 0) + dt;
+          e.y = (e.baseY || 0) + (e.amplitude || 0) * Math.sin((e.frequency || 1) * e.t + (e.phase || 0));
 
-        case 'DIVER':
-          const anyPlayerBelow = Object.values(this.players).some((p:any) => p.y > e.y);
-          if (!e.diving){
-            if (anyPlayerBelow){
-              if (!e.idleStartAt) e.idleStartAt = now;
-              if (!e.lastBlinkAt || now - e.lastBlinkAt >= (e.blinkMs||300)){
-                e.visible = !e.visible; e.lastBlinkAt = now;
+          if (canEnemiesFire) {
+            const fireCooldown = Math.max(500, Math.floor(2200 / diff));
+            if (now - (e.lastFireAt || 0) > fireCooldown) {
+              e.lastFireAt = now;
+              this.spawnEnemyBullet(e.x + e.w/2, e.y + e.h, 0, ENEMY_PROJ_SPEED * diff);
+              if (diff > 1.5 && Math.random() < 0.35) {
+                this.spawnEnemyBullet(e.x + e.w/2, e.y + e.h,  0.18 * diff, ENEMY_PROJ_SPEED * diff);
+                this.spawnEnemyBullet(e.x + e.w/2, e.y + e.h, -0.18 * diff, ENEMY_PROJ_SPEED * diff);
               }
-              if (now - e.idleStartAt >= (e.diveStartDelayMs||3000)){
-                e.diving = true; e.vy = e.diveSpeed || 3.2; e.visible = true;
+            }
+          }
+          break;
+        }
+
+        case 'JUMPER': {
+          if (!e.lastJumpAt) e.lastJumpAt = now;
+          if (now - e.lastJumpAt >= (e.jumpIntervalMs || 1200)) {
+            e.lastJumpAt = now;
+            const step  = 0.20 * (e.direction || 1);
+            const nextX = (e.x || 0) + step;
+            if (nextX < -0.95 || nextX + e.w > 0.95) {
+              e.direction = -(e.direction || 1);
+              e.y = Math.min(0.75, e.y + 0.07);
+            } else {
+              e.x = nextX;
+            }
+            if (canEnemiesFire) {
+              const jumpFireCooldown = Math.max(400, Math.floor(1600 / diff));
+              if (now - (e.lastJumpFireAt || 0) > jumpFireCooldown) {
+                e.lastJumpFireAt = now;
+                this.spawnEnemyBullet(e.x + e.w/2, e.y + e.h, 0, ENEMY_PROJ_SPEED * diff);
+              }
+            }
+          }
+          break;
+        }
+
+        case 'DIVER': {
+          const playerBelow = Object.values(this.players).some((p: any) => !p.isSpectator && p.y > e.y);
+          if (!e.diving) {
+            if (playerBelow) {
+              if (!e.idleStartAt) e.idleStartAt = now;
+              if (now - (e.lastBlinkAt || 0) >= (e.blinkMs || 250)) {
+                e.visible     = !e.visible;
+                e.lastBlinkAt = now;
+              }
+              if (now - e.idleStartAt >= (e.diveStartDelayMs || 2500)) {
+                e.diving = true; e.vy = e.diveSpeed || 3.0; e.visible = true;
               }
             } else {
               e.idleStartAt = 0; e.visible = true;
             }
           } else {
-            e.y += (e.vy||0) * dt;
-            if (e.y > 1.3) e.alive = false;
+            e.y += (e.vy || 0) * dt;
+            if (e.y > 1.2) e.alive = false;
           }
           break;
+        }
       }
     }
   }
 
-  // Create a new enemy instance for respawn with varied positions by type
-  private generateEnemy(type: EnemyType): EnemyState {
-    const difficulty = Math.pow(1.18, Math.max(0, this.waveNumber - 1));
-    const startX = -0.9 + Math.random() * 1.8;
-    let ex = startX;
-    let ey = -0.8;
-    const baseHp = 1 + Math.floor((this.waveNumber - 1) / 2);
-    const e: EnemyState = {
-      id: this.nextEnemyId++,
-      type,
-      x: ex,
-      y: ey,
-      w: 0.10,
-      h: 0.06,
-      hp: baseHp,
-      alive: true
-    };
-
-    if (type === 'PENDULUM'){
-      e.vx = (0.25 + Math.random()*0.2) * (Math.random() < 0.5 ? 1 : -1) * difficulty;
-      e.baseY = ey + (Math.random()*0.06 - 0.02);
-      e.amplitude = (0.08 + Math.random()*0.06) * (1 + 0.08*(this.waveNumber-1));
-      e.frequency = (2 + Math.random()*2) * (1 + 0.06*(this.waveNumber-1));
-      e.phase = Math.random()*Math.PI*2;
-      e.lastPeakFireAt = 0;
-    } else if (type === 'JUMPER'){
-      e.jumpIntervalMs = Math.max(350, Math.floor(1100 / difficulty) + Math.floor(Math.random()*800));
-      e.lastJumpAt = Date.now() + Math.random()*e.jumpIntervalMs;
-      e.direction = Math.random() < 0.5 ? -1 : 1;
-      e.y = -0.7 + Math.random()*0.06;
-    } else if (type === 'DIVER'){
-      e.diving = false;
-      e.idleStartAt = 0;
-      e.diveStartDelayMs = Math.max(500, Math.floor(1800 / difficulty) + Math.floor(Math.random()*1500));
-      e.blinkMs = 150 + Math.floor(Math.random()*200);
-      e.lastBlinkAt = Date.now();
-      e.visible = true;
-      e.diveSpeed = (3.8 + Math.random()*1.8) * difficulty;
-      e.x = -0.9 + Math.random()*1.8;
-      e.y = -0.95 + Math.random()*0.08;
-    }
-    return e;
+  private spawnEnemyBullet(x: number, y: number, vx: number, vy: number) {
+    this.projectiles.push({ x, y, vx, vy, w: PROJ_W, h: PROJ_H, owner: 'enemy', alive: true });
   }
 
-  private randomEnemyType(): EnemyType {
-    const types: EnemyType[] = ['PENDULUM','JUMPER','DIVER'];
-    return types[Math.floor(Math.random() * types.length)];
+  // ── handleFire ────────────────────────────────────────────────────────
+  private handleFire(clientId: string, now: number) {
+    const p  = this.players[clientId];
+    const st = this.playerState[clientId];
+    if (!p || !st) return;
+    if (st.isOverheated && now < st.overheatedUntil) return;
+
+    const fireCooldown = Math.max(80, FIRE_COOLDOWN_MS - (this.waveNumber - 1) * 12);
+    if (now - st.lastShotAt < fireCooldown) return;
+
+    st.lastShotAt = now;
+    st.heat = Math.min(100, st.heat + HEAT_PER_SHOT);
+    if (st.heat >= 100) { st.isOverheated = true; st.overheatedUntil = now + OVERHEAT_MS; }
+
+    if (this.waveNumber >= 3) {
+      // Spread shot da ondata 3
+      this.projectiles.push({ x: p.x + PLAYER_W / 2, y: p.y, vx: -0.18, vy: PLAYER_PROJ_SPEED, w: PROJ_W, h: PROJ_H, owner: 'player', ownerId: clientId, alive: true });
+      this.projectiles.push({ x: p.x + PLAYER_W / 2, y: p.y, vx:  0,    vy: PLAYER_PROJ_SPEED, w: PROJ_W, h: PROJ_H, owner: 'player', ownerId: clientId, alive: true });
+      this.projectiles.push({ x: p.x + PLAYER_W / 2, y: p.y, vx:  0.18, vy: PLAYER_PROJ_SPEED, w: PROJ_W, h: PROJ_H, owner: 'player', ownerId: clientId, alive: true });
+    } else {
+      this.projectiles.push({ x: p.x + PLAYER_W / 2, y: p.y, vx: 0, vy: PLAYER_PROJ_SPEED, w: PROJ_W, h: PROJ_H, owner: 'player', ownerId: clientId, alive: true });
+    }
+  }
+
+  // ── handleShield ──────────────────────────────────────────────────────
+  private handleShield(clientId: string, now: number) {
+    const st = this.playerState[clientId];
+    if (!st || now < st.shieldCooldownUntil) return;
+    st.shieldExpiresAt    = now + SHIELD_MS;
+    st.shieldCooldownUntil = now + SHIELD_COOLDOWN_MS;
+  }
+
+  // ── snapshot / runtimeState ───────────────────────────────────────────
+  private snapshot(now: number) {
+    return {
+      players:          this.players,
+      enemies:          this.enemies,
+      projectiles:      this.projectiles,
+      powerUps:         this.powerUps,        // ← incluso nel payload
+      lives:            this.lives,
+      teamScore:        this.teamScore,
+      waveNumber:       this.waveNumber,
+      inTransition:     this.inTransition,
+      transitionMsLeft: this.inTransition ? Math.max(0, this.waveTransitionUntil - now) : 0,
+    };
+  }
+
+  private attachRuntimeState(now: number) {
+    for (const pid of Object.keys(this.players)) {
+      const st = this.playerState[pid];
+      this.players[pid].runtimeState = st ? {
+        heat:             st.heat,
+        isOverheated:     st.isOverheated,
+        shieldActive:     st.shieldExpiresAt > now,
+        shieldCooldownMs: Math.max(0, st.shieldCooldownUntil - now),
+      } : null;
+    }
   }
 
   isFinished(): boolean { return this.lives <= 0; }
 }
 
-/* =====================
+/* =====================================================================
    SpaceClient
-   ===================== */
+   ===================================================================== */
 export class SpaceClient extends GameClient {
-  private players: Record<string, any> = null;
-  private enemies: EnemyState[] = [];
-  private serverEnemies: EnemyState[] = [];
-  private projectiles: ProjectileState[] = [];
-  private messageQueue: any[] = [];
-  // Start client-side lives matching server
-  private lives: number = 5;
-  private localShieldUntil: number = 0;
-  private localShieldCooldownUntil: number = 0;
-  private gameOver: boolean = false;
-  private finalScores: { name: string; score: number }[] = [];
-  private returnRequested: boolean = false;
-  private gameOverAt: number = 0;
-  private teamScore: number = 0;
+  private players:       Record<string, any> = null;
+  private enemies:       EnemyState[]        = [];
+  private serverEnemies: EnemyState[]        = [];
+  private projectiles:   ProjectileState[]   = [];
+  private powerUps:      PowerUpState[]      = [];   // ← power-up client
+  private messageQueue:  any[]               = [];
+  private lives:         number              = 5;
+  private teamScore:     number              = 0;
+  private waveNumber:    number              = 1;
+  private inTransition:  boolean             = false;
+  private transitionMsLeft: number           = 0;
+  private started:        boolean             = false;
+  private gameOver:      boolean             = false;
+  private returnRequested: boolean           = false;
 
-  constructor(userInput: UserInput, myId: string){
+  private localShieldUntil:         number = 0;
+  private localShieldCooldownUntil: number = 0;
+
+  private fireHeld:      boolean = false;
+  private lastAutoFireAt: number = 0;
+
+  constructor(userInput: UserInput, myId: string) {
     super(userInput, myId);
 
-    // Simple key mapping for fire/shield (both Space/Enter and Shift/Ctrl)
     document.addEventListener('keydown', (e) => {
-      // if this client has been marked spectator by the server, allow exit (Enter/Escape)
-      // but ignore other game inputs
-      const meCheck = (this.players && this.players[this.myId]) ? this.players[this.myId] : null;
-      const isSpectator = !!(meCheck && meCheck.isSpectator);
-      if (isSpectator) {
-        if (e.code === 'Enter' || e.code === 'Escape') {
-          this.requestReturnToLobby();
-        }
+      const me = this.players?.[this.myId];
+      if (me?.isSpectator || this.gameOver) {
+        if (e.code === 'Enter' || e.code === 'Escape') this.requestReturnToLobby();
         return;
       }
-      // When game over, use Enter/Escape to confirm return to lobby
-      if (this.gameOver) {
-        if (e.code === 'Enter' || e.code === 'Escape') {
-          this.requestReturnToLobby();
+      if (e.code === 'Space' || e.code === 'Enter') {
+        if (!this.started) {
+          this.started = true;
+          this.messageQueue.push({ kind: 'start' });
+          return;
         }
-        return;
+        if (!this.fireHeld) {
+          this.messageQueue.push({ kind: 'fire' });
+          this.lastAutoFireAt = Date.now();
+        }
+        this.fireHeld = true;
       }
-
-      if (e.code === 'Space' || e.code === 'Enter') this.messageQueue.push({ kind: 'fire' });
-      if (e.code === 'ShiftLeft' || e.code === 'ShiftRight' || e.code === 'ControlLeft' || e.code === 'ControlRight'){
+      if (e.code === 'ShiftLeft' || e.code === 'ShiftRight' ||
+          e.code === 'ControlLeft' || e.code === 'ControlRight') {
         const now = Date.now();
-        if (now >= this.localShieldCooldownUntil){
+        if (now >= this.localShieldCooldownUntil) {
           this.messageQueue.push({ kind: 'shield' });
-          // immediate visual feedback and local cooldown prediction
-          this.localShieldUntil = now + SHIELD_DURATION_MS;
-          this.localShieldCooldownUntil = now + SHIELD_COOLDOWN_MS;
+          this.localShieldUntil         = now + SHIELD_MS;
+          this.localShieldCooldownUntil  = now + SHIELD_COOLDOWN_MS;
         }
       }
+    });
+
+    document.addEventListener('keyup', (e) => {
+      if (e.code === 'Space' || e.code === 'Enter') this.fireHeld = false;
     });
   }
 
-  async init(players){ this.players = players; }
+  async init(players) { this.players = players; }
 
-  draw(ctx: CanvasRenderingContext2D, dt: number){
-    if (!this.players) return;
-
+  // ── draw ──────────────────────────────────────────────────────────────
+  draw(ctx: CanvasRenderingContext2D, dt: number) {
     const { screenW, screenH, moveDirectionX } = this.userInput;
-    const canvas = this.userInput.canvas;
-    const canvasW = canvas.width;
-    const canvasH = canvas.height;
-    // compute device pixel ratio used by the canvas by comparing its
-    // internal pixel size (canvas.width) with its CSS size (bounding rect)
-    const canvasRect = canvas.getBoundingClientRect();
-    const cssWidth = canvasRect.width || this.userInput.screenW || canvasW;
+    const canvas   = this.userInput.canvas;
+    const canvasW  = canvas.width;
+    const canvasH  = canvas.height;
+    const cssWidth = canvas.getBoundingClientRect().width || screenW || canvasW;
     const dprScale = canvasW / cssWidth || window.devicePixelRatio || 1;
 
-    // Local smoothing movement for the local player (disabled if game over)
-    const me = this.players[this.myId];
-    if (me && !this.gameOver && !me.isSpectator){
-      // apply immediate local input
-      me.x += moveDirectionX * dt * PLAYER_SPEED;
-      // clamp locally
-      if (me.x < -1) me.x = -1;
-      if (me.x + PLAYER_W > 1) me.x = 1 - PLAYER_W;
-      // Smoothly correct toward server authoritative position when available
-      const serverX = (me as any)._serverX;
-      if (typeof serverX === 'number'){
-        // use lerp for smooth correction towards server value
-        const alpha = Math.min(1, dt * 8);
-        me.x = lerp(me.x, serverX, alpha);
-      }
+    // Schermata iniziale (nessun player ancora)
+    if (!this.players && !this.started) {
+      ctx.save();
+      ctx.fillStyle = '#001022';
+      ctx.fillRect(0, 0, canvasW, canvasH);
+      ctx.fillStyle = '#fff';
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.font = `${Math.max(22, Math.round(32 * dprScale))}px Arial`;
+      ctx.fillText('Space Invaders', canvasW / 2, canvasH * 0.30);
+      ctx.font = `${Math.max(12, Math.round(18 * dprScale))}px Arial`;
+      ctx.fillText('Premi Space o Enter per iniziare', canvasW / 2, canvasH * 0.48);
+      ctx.fillText('Muovi: A/D o frecce', canvasW / 2, canvasH * 0.58);
+      ctx.fillText('Spara: Space/Enter (tieni premuto)', canvasW / 2, canvasH * 0.64);
+      ctx.fillText('Scudo: Shift o Ctrl', canvasW / 2, canvasH * 0.70);
+      ctx.restore();
+      return;
     }
+    if (!this.players) return;
 
-    // Smooth other players toward their server positions (skip smoothing on game over)
-    if (!this.gameOver) {
-      const playerSmoothingAlpha = Math.min(1, dt * 8);
-      Object.keys(this.players).forEach(pid => {
-        if (pid === this.myId) return;
-        const other = this.players[pid];
-        if (!other) return;
-        const sx = (other as any)._serverX;
-        if (typeof sx === 'number') other.x = lerp(other.x, sx, playerSmoothingAlpha);
-      });
-    }
-
-    // Draw in normalized coordinates: translate/scale like other games
-    ctx.save();
-    ctx.translate(screenW/2, screenH/2);
-    ctx.scale(screenW/2, screenH/2);
-
-    // background
-    ctx.fillStyle = '#001022'; ctx.fillRect(-1, -1, 2, 2);
-
-    // players
-    Object.keys(this.players).forEach(id => {
-      const p = this.players[id];
-      const color = p.color || '#88ff88';
-      ctx.fillStyle = color;
-      ctx.fillRect(p.x, p.y, PLAYER_W, PLAYER_H);
-      // draw shield: prefer immediate local feedback for local player
-      const st = (p as any).runtimeState;
-      const isLocal = id === this.myId;
-      const localShieldActive = isLocal && Date.now() < this.localShieldUntil;
-      const serverShieldActive = !!(st && st.shieldActive);
-      if (localShieldActive || serverShieldActive){
-        const sw = PLAYER_W * 1.8; const sx = p.x + (PLAYER_W - sw)/2; const sy = p.y - 0.05;
-        ctx.fillStyle = 'rgba(80,160,255,0.45)'; ctx.fillRect(sx, sy, sw, 0.06);
-      }
-
-      // draw heat bar & shield cooldown if available (server-provided runtimeState)
-      if (st){
-        // background for heat
-        ctx.fillStyle = '#333'; ctx.fillRect(p.x, p.y - 0.04, PLAYER_W, 0.02);
-        // heat fill
-        ctx.fillStyle = st.isOverheated ? '#ff3333' : '#ffcc00';
-        const heatW = (st.heat / 100) * PLAYER_W;
-        ctx.fillRect(p.x, p.y - 0.04, heatW, 0.02);
-
-        // shield cooldown indicator (under player) - use the larger of server-side and local predicted cooldown
-        let cdMs = st.shieldCooldownMs || 0;
-        if (isLocal){
-          const localCd = Math.max(0, this.localShieldCooldownUntil - Date.now());
-          cdMs = Math.max(cdMs, localCd);
-        }
-        const cdFrac = Math.min(1, cdMs / SHIELD_COOLDOWN_MS);
-        ctx.fillStyle = '#555'; ctx.fillRect(p.x, p.y + PLAYER_H + 0.02, PLAYER_W, 0.01);
-        ctx.fillStyle = '#00aaff'; ctx.fillRect(p.x, p.y + PLAYER_H + 0.02, PLAYER_W * (1 - cdFrac), 0.01);
-      }
-    });
-
-    // enemies: smoothly lerp display enemies toward latest server snapshot
-    const enemyAlpha = Math.min(1, dt * 10);
-    this.enemies.forEach(e => {
-      const serverE = this.serverEnemies.find(s => s.id === e.id);
-      if (serverE) {
-        e.x = lerp(e.x, serverE.x, enemyAlpha);
-        e.y = lerp(e.y, serverE.y, enemyAlpha);
-        e.visible = serverE.visible;
-      }
-      if (e.type === 'DIVER' && e.visible === false) return;
-      ctx.fillStyle = e.type === 'PENDULUM' ? '#9bdfef' : e.type === 'JUMPER' ? '#ffd59e' : '#ff9090';
-      ctx.fillRect(e.x, e.y, e.w, e.h);
-    });
-
-    // projectiles
-    this.projectiles.forEach(p => {
-      ctx.fillStyle = p.owner === 'player' ? '#ffffff' : '#ff4444';
-      ctx.fillRect(p.x - p.w/2, p.y - p.h/2, p.w, p.h);
-    });
-
-    ctx.restore();
-
-    // HUD — draw centered at the top so it never clips at the sides
-    ctx.save();
-    ctx.fillStyle = '#fff';
-    ctx.textBaseline = 'top';
-    ctx.textAlign = 'center';
-    // use canvas vs CSS scale to pick font sizes and margins so text isn't clipped on high-DPI
-    const hudMarginCss = 18;
-    const fontLargeCss = 20;
-    const fontSmallCss = 14;
-    const hudMargin = Math.max(8, Math.round(hudMarginCss * dprScale));
-    const fontLargePx = Math.max(12, Math.round(fontLargeCss * dprScale));
-    const fontSmallPx = Math.max(10, Math.round(fontSmallCss * dprScale));
-    const extraPad = Math.max(2, Math.round(2 * dprScale));
-    const cssTop = canvasRect.top || 0;
-    const topInsetPx = Math.round(Math.max(0, cssTop) * dprScale);
-    const hudY = Math.max(hudMargin + extraPad, topInsetPx + hudMargin + Math.round(2 * dprScale));
-    const hudX = Math.round(canvasW / 2);
-    ctx.font = `${fontLargePx}px Arial`;
-    ctx.fillText(`Lives: ${this.lives}`, hudX, Math.round(hudY));
-    ctx.font = `${fontSmallPx}px Arial`;
-    ctx.fillText(`Score: ${this.teamScore}`, hudX, Math.round(hudY + fontLargePx + Math.round(6 * dprScale)));
-    ctx.restore();
-
-    // Game over overlay + final scoreboard
-    if (this.gameOver) {
+    if (!this.started && !this.gameOver) {
       ctx.save();
       ctx.fillStyle = 'rgba(0,0,0,0.65)';
-      // draw overlay using canvas pixels
       ctx.fillRect(0, 0, canvasW, canvasH);
+      ctx.fillStyle = '#fff';
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.font = `${Math.max(22, Math.round(32 * dprScale))}px Arial`;
+      ctx.fillText('Space Invaders', canvasW / 2, canvasH * 0.30);
+      ctx.font = `${Math.max(12, Math.round(18 * dprScale))}px Arial`;
+      ctx.fillText('Premi Space o Enter per iniziare', canvasW / 2, canvasH * 0.48);
+      ctx.fillText('Muovi: A/D o frecce', canvasW / 2, canvasH * 0.58);
+      ctx.fillText('Spara: Space/Enter (tieni premuto)', canvasW / 2, canvasH * 0.64);
+      ctx.fillText('Scudo: Shift o Ctrl', canvasW / 2, canvasH * 0.70);
+      ctx.restore();
+      return;
+    }
 
-      ctx.fillStyle = '#ffffff';
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
+    // Auto-fire mentre Space è tenuto
+    if (this.fireHeld && !this.gameOver) {
+      const now = Date.now();
+      if (now - this.lastAutoFireAt >= FIRE_COOLDOWN_MS) {
+        this.messageQueue.push({ kind: 'fire' });
+        this.lastAutoFireAt = now;
+      }
+    }
 
+    // Predizione posizione locale del giocatore
+    const me = this.players[this.myId];
+    if (me && !this.gameOver && !me.isSpectator) {
+      me.x += moveDirectionX * dt * PLAYER_SPEED;
+      me.x = Math.max(-1, Math.min(1 - PLAYER_W, me.x));
+      const sx = (me as any)._serverX;
+      if (typeof sx === 'number') me.x = lerp(me.x, sx, Math.min(1, dt * 8));
+    }
+
+    // Smooth giocatori remoti
+    if (!this.gameOver) {
+      for (const pid of Object.keys(this.players)) {
+        if (pid === this.myId) continue;
+        const other = this.players[pid];
+        const sx = (other as any)._serverX;
+        if (typeof sx === 'number') other.x = lerp(other.x, sx, Math.min(1, dt * 8));
+      }
+    }
+
+    // ── Spazio di disegno normalizzato ───────────────────────────────
+    ctx.save();
+    ctx.translate(screenW / 2, screenH / 2);
+    ctx.scale(screenW / 2, screenH / 2);
+
+    // Sfondo
+    ctx.fillStyle = '#001022';
+    ctx.fillRect(-1, -1, 2, 2);
+
+    // Giocatori
+    for (const id of Object.keys(this.players)) {
+      const p  = this.players[id];
+      const st = p.runtimeState;
+      const isMe = id === this.myId;
+
+      ctx.fillStyle = p.color || '#88ff88';
+      ctx.fillRect(p.x, p.y, PLAYER_W, PLAYER_H);
+
+      const shieldOn = (isMe && Date.now() < this.localShieldUntil) || !!(st?.shieldActive);
+      if (shieldOn) {
+        const sw = PLAYER_W * 1.8;
+        ctx.fillStyle = 'rgba(80,160,255,0.45)';
+        ctx.fillRect(p.x + (PLAYER_W - sw) / 2, p.y - 0.05, sw, 0.06);
+      }
+
+      if (st) {
+        ctx.fillStyle = '#222';
+        ctx.fillRect(p.x, p.y - 0.04, PLAYER_W, 0.02);
+        ctx.fillStyle = st.isOverheated ? '#ff3333' : '#ffcc00';
+        ctx.fillRect(p.x, p.y - 0.04, (st.heat / 100) * PLAYER_W, 0.02);
+        const cdMs   = isMe ? Math.max(st.shieldCooldownMs || 0, Math.max(0, this.localShieldCooldownUntil - Date.now())) : (st.shieldCooldownMs || 0);
+        const cdFrac = Math.min(1, cdMs / SHIELD_COOLDOWN_MS);
+        ctx.fillStyle = '#444'; ctx.fillRect(p.x, p.y + PLAYER_H + 0.015, PLAYER_W, 0.01);
+        ctx.fillStyle = '#00aaff'; ctx.fillRect(p.x, p.y + PLAYER_H + 0.015, PLAYER_W * (1 - cdFrac), 0.01);
+      }
+    }
+
+    // Nemici
+    const alpha = Math.min(1, dt * 12);
+    for (const e of this.enemies) {
+      const se = this.serverEnemies.find(s => s.id === e.id);
+      if (se) {
+        const dx = Math.abs(se.x - e.x), dy = Math.abs(se.y - e.y);
+        e.x = dx > 0.3  ? se.x : lerp(e.x, se.x, alpha);
+        e.y = dy > 0.25 ? se.y : lerp(e.y, se.y, alpha);
+        e.visible = se.visible;
+        e.type = se.type; e.w = se.w; e.h = se.h;
+      }
+      if (e.type === 'DIVER' && e.visible === false) continue;
+      ctx.fillStyle = e.type === 'PENDULUM' ? '#9bdfef' : e.type === 'JUMPER' ? '#ffd59e' : '#ff9090';
+      ctx.fillRect(e.x, e.y, e.w, e.h);
+    }
+
+    // Proiettili
+    for (const pr of this.projectiles) {
+      ctx.fillStyle = pr.owner === 'player' ? '#ffffff' : '#ff4444';
+      ctx.fillRect(pr.x - pr.w / 2, pr.y - pr.h / 2, pr.w, pr.h);
+    }
+
+    // ── Power-up ──────────────────────────────────────────────────────
+    for (const pu of this.powerUps) {
+      // LIFE  → rettangolo verde con una croce bianca
+      // SHIELD → rettangolo azzurro con uno scudo bianco (semplice triangolo)
+      if (pu.type === 'LIFE') {
+        ctx.fillStyle = '#33dd55';
+        ctx.fillRect(pu.x, pu.y, pu.w, pu.h);
+        // croce bianca
+        ctx.fillStyle = '#ffffff';
+        const cx = pu.x + pu.w / 2, cy = pu.y + pu.h / 2;
+        const arm = pu.w * 0.28, thick = pu.h * 0.14;
+        ctx.fillRect(cx - thick / 2, cy - arm, thick, arm * 2); // verticale
+        ctx.fillRect(cx - arm, cy - thick / 2, arm * 2, thick); // orizzontale
+      } else { // SHIELD
+        ctx.fillStyle = '#33aaff';
+        ctx.fillRect(pu.x, pu.y, pu.w, pu.h);
+        // scudo (arco semplificato con fillRect + bezier)
+        ctx.fillStyle = '#ffffff';
+        ctx.beginPath();
+        const sx = pu.x + pu.w / 2, sy = pu.y + pu.h * 0.18;
+        const sr = pu.w * 0.34;
+        ctx.moveTo(sx - sr, sy);
+        ctx.lineTo(sx + sr, sy);
+        ctx.lineTo(sx + sr, sy + sr * 0.9);
+        ctx.quadraticCurveTo(sx, sy + sr * 2.0, sx - sr, sy + sr * 0.9);
+        ctx.closePath();
+        ctx.fill();
+      }
+    }
+
+    ctx.restore();
+
+    // ── HUD ──────────────────────────────────────────────────────────
+    ctx.save();
+    ctx.textBaseline = 'top'; ctx.textAlign = 'center';
+    const fLg = Math.max(12, Math.round(20 * dprScale));
+    const fSm = Math.max(10, Math.round(14 * dprScale));
+    const hY  = Math.max(8,  Math.round(18 * dprScale));
+    const hX  = Math.round(canvasW / 2);
+    ctx.fillStyle = '#fff';
+    ctx.font = `${fLg}px Arial`;
+    ctx.fillText(`Vite: ${this.lives}`, hX, hY);
+    ctx.font = `${fSm}px Arial`;
+    ctx.fillText(`Punteggio: ${this.teamScore}  |  Ondata: ${this.waveNumber}`, hX, hY + fLg + 4);
+    ctx.restore();
+
+    // ── Legenda power-up (angolo in basso a sinistra) ─────────────────
+    ctx.save();
+    ctx.textBaseline = 'middle'; ctx.textAlign = 'left';
+    ctx.font = `${Math.max(9, Math.round(12 * dprScale))}px Arial`;
+    const legX = Math.round(8 * dprScale);
+    const legY = canvasH - Math.round(38 * dprScale);
+    const sq   = Math.round(12 * dprScale);
+    ctx.fillStyle = '#33dd55'; ctx.fillRect(legX, legY, sq, sq);
+    ctx.fillStyle = '#ccc';    ctx.fillText('+2 vite', legX + sq + 4, legY + sq / 2);
+    ctx.fillStyle = '#33aaff'; ctx.fillRect(legX, legY + sq + 4, sq, sq);
+    ctx.fillStyle = '#ccc';    ctx.fillText('scudo team', legX + sq + 4, legY + sq + 4 + sq / 2);
+    ctx.restore();
+
+    // ── Wave transition overlay ──────────────────────────────────────
+    if (this.inTransition) {
+      const secLeft = Math.ceil(this.transitionMsLeft / 1000);
+      ctx.save();
+      ctx.fillStyle = 'rgba(0,0,0,0.55)'; ctx.fillRect(0, 0, canvasW, canvasH);
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillStyle = '#fff';
+      ctx.font = `${Math.max(18, Math.round(42 * dprScale))}px Arial`;
+      ctx.fillText(`Ondata ${this.waveNumber} completata!`, canvasW/2, canvasH * 0.38);
+      ctx.fillStyle = '#aaddff';
+      ctx.font = `${Math.max(13, Math.round(22 * dprScale))}px Arial`;
+      ctx.fillText(`Ondata ${this.waveNumber + 1} in arrivo tra ${secLeft}…`, canvasW/2, canvasH * 0.50);
+      ctx.restore();
+    }
+
+    // ── Game Over overlay ────────────────────────────────────────────
+    if (this.gameOver) {
+      ctx.save();
+      ctx.fillStyle = 'rgba(0,0,0,0.65)'; ctx.fillRect(0, 0, canvasW, canvasH);
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillStyle = '#fff';
       ctx.font = `${Math.max(18, Math.round(48 * dprScale))}px Arial`;
-      ctx.fillText('Game Over', canvasW / 2, canvasH * 0.25);
-
-      ctx.font = `${Math.max(14, Math.round(22 * dprScale))}px Arial`;
-      ctx.fillText('Final Score', canvasW / 2, canvasH * 0.33);
-
-      ctx.font = `${Math.max(18, Math.round(28 * dprScale))}px Arial`;
-      ctx.fillText(`${this.teamScore}`, canvasW / 2, canvasH * 0.42);
-
-      ctx.font = `${Math.max(12, Math.round(16 * dprScale))}px Arial`;
-      ctx.fillText('Premi Enter o Escape per tornare alla lobby', canvasW / 2, canvasH * 0.83);
+      ctx.fillText('Game Over', canvasW/2, canvasH * 0.28);
+      ctx.fillStyle = '#aaddff';
+      ctx.font = `${Math.max(14, Math.round(24 * dprScale))}px Arial`;
+      ctx.fillText(`Punteggio finale: ${this.teamScore}`, canvasW/2, canvasH * 0.42);
+      ctx.fillStyle = '#888';
+      ctx.font = `${Math.max(11, Math.round(15 * dprScale))}px Arial`;
+      ctx.fillText('Premi Enter o Escape per tornare alla lobby', canvasW/2, canvasH * 0.82);
       ctx.restore();
     }
   }
 
-  handleMessage(message: any){
-    // Merge server snapshot with local state and separate server enemies for smoothing.
+  // ── handleMessage ─────────────────────────────────────────────────────
+  handleMessage(message: any) {
     const srvPlayers = message.players || {};
+
     if (!this.players) {
       this.players = {};
-      Object.keys(srvPlayers).forEach(id => {
+      for (const id of Object.keys(srvPlayers)) {
         this.players[id] = { ...srvPlayers[id] };
         (this.players[id] as any)._serverX = srvPlayers[id].x;
-      });
+      }
     } else {
-      Object.keys(srvPlayers).forEach(id => {
-        const server = srvPlayers[id];
+      for (const id of Object.keys(srvPlayers)) {
+        const srv = srvPlayers[id];
         if (id === this.myId) {
           const local = this.players[id] || {};
-          const preservedX = local.x !== undefined ? local.x : server.x;
-          this.players[id] = { ...server, x: preservedX };
-          (this.players[id] as any)._serverX = server.x;
-          this.players[id].runtimeState = server.runtimeState;
+          this.players[id] = { ...srv, x: local.x ?? srv.x };
+          (this.players[id] as any)._serverX = srv.x;
+          this.players[id].runtimeState = srv.runtimeState;
         } else {
-          if (!this.players[id]) {
-            this.players[id] = { ...server };
-            (this.players[id] as any)._serverX = server.x;
-          } else {
-            // keep local display x, but set server correction target and runtime info
-            (this.players[id] as any)._serverX = server.x;
-            this.players[id].runtimeState = server.runtimeState;
-            if (server.color && !this.players[id].color) this.players[id].color = server.color;
+          if (!this.players[id]) this.players[id] = { ...srv };
+          else {
+            this.players[id].runtimeState = srv.runtimeState;
+            if (srv.color && !this.players[id].color) this.players[id].color = srv.color;
           }
+          (this.players[id] as any)._serverX = srv.x;
         }
-      });
+      }
     }
 
-    // store authoritative enemy snapshot; prepare display enemies if first time
+    // Sync nemici
     this.serverEnemies = message.enemies || [];
     if (!this.enemies || this.enemies.length === 0) {
       this.enemies = this.serverEnemies.map(e => ({ ...e }));
     } else {
-      // update/insert display enemies and mark removals
       for (const se of this.serverEnemies) {
         const disp = this.enemies.find(d => d.id === se.id);
         if (!disp) this.enemies.push({ ...se });
-        else {
-          (disp as any)._serverX = se.x;
-          (disp as any)._serverY = se.y;
-          disp.visible = se.visible;
-          disp.w = se.w; disp.h = se.h; disp.type = se.type;
-        }
+        else { disp.w = se.w; disp.h = se.h; disp.type = se.type; disp.visible = se.visible; }
       }
-      // remove display enemies that the server no longer has
       this.enemies = this.enemies.filter(d => this.serverEnemies.some(s => s.id === d.id));
     }
 
-    // projectiles and lives are displayed directly
-    this.projectiles = message.projectiles || [];
-    this.lives = message.lives;
-    this.teamScore = typeof message.teamScore === 'number' ? message.teamScore : this.teamScore;
+    // ── Sync power-up dal server ───────────────────────────────────
+    this.powerUps = message.powerUps || [];
 
-    // detect game over from server snapshot and capture final scores for the overlay
+    if (!this.started && (message.enemies || []).length) this.started = true;
+    this.projectiles      = message.projectiles    || [];
+    this.lives            = message.lives;
+    this.teamScore        = message.teamScore       ?? this.teamScore;
+    this.waveNumber       = message.waveNumber      ?? this.waveNumber;
+    this.inTransition     = !!message.inTransition;
+    this.transitionMsLeft = message.transitionMsLeft ?? 0;
+
     if (this.lives <= 0 && !this.gameOver) {
-      this.gameOver = true;
-      this.gameOverAt = Date.now();
-      // snapshot final scores from the last server update
-      this.finalScores = Object.keys(this.players || {}).map(id => {
-        const p = this.players[id] || {};
-        return { name: (p.name || id), score: (p.score || 0) };
-      }).sort((a,b) => b.score - a.score);
-      // clear queued local actions
-      this.messageQueue = [];
+      this.gameOver = true; this.messageQueue = [];
     }
   }
 
+  // ── flushMessages ─────────────────────────────────────────────────────
   flushMessages(): any[] {
-    if (!this.players) return [];
-    // while in the game-over menu, do not send any game actions
-    if (this.gameOver) return [];
+    if (!this.players || this.gameOver) return [];
     const me = this.players[this.myId];
-    if (!me) return [];
-    // spectators do not send actions
-    if (me.isSpectator) return [];
-
-    const msgs = [];
-    msgs.push({ kind: 'move', x: me.x });
-    // append queued actions (fire/shield)
-    msgs.push(...this.messageQueue);
+    if (!me || me.isSpectator) return [];
+    const msgs = [{ kind: 'move', x: me.x }, ...this.messageQueue];
     this.messageQueue = [];
     return msgs;
   }
-  // Called by the lobby to know when to remove the game client.
-  // We only return true after the player explicitly requests to return to the lobby.
-  public requestReturnToLobby(): void {
-    this.returnRequested = true;
-  }
 
+  public requestReturnToLobby() { this.returnRequested = true; }
   isFinished(): boolean { return this.returnRequested; }
 }

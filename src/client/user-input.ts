@@ -9,11 +9,13 @@ export class UserInput {
     public mouseX: number = 0;
     public mouseY: number = 0;
     public zoom: number = 1;
+    public wheelDelta: number = 0;
 
     private up: boolean = false;
     private down: boolean = false;
     private left: boolean = false;
     private right: boolean = false;
+    private mouseLeftPressed: boolean = false;
 
     constructor(canvas: HTMLCanvasElement) {
         this.canvas = canvas;
@@ -38,6 +40,7 @@ export class UserInput {
 
             this.updateMoveDirections();
         });
+
         document.addEventListener("keyup", (event) => {
             if (event.code == "KeyW") this.up = false;
             else if (event.code == "KeyA") this.left = false;
@@ -65,6 +68,9 @@ export class UserInput {
             this.mouseY = rawY * scaleY;
         });
 
+        this.canvas.addEventListener('mousedown', (event) => { if (event.button === 0) this.mouseLeftPressed = true; });
+        this.canvas.addEventListener('mouseup', (event) => { if (event.button === 0) this.mouseLeftPressed = false; });
+
         window.addEventListener('wheel', (event) => {
             event.preventDefault();
 
@@ -86,4 +92,6 @@ export class UserInput {
         if (this.down) this.moveDirectionY += 1;
         if (this.right) this.moveDirectionX += 1;
     }
+
+    public get isMouseLeftPressed(): boolean { return this.mouseLeftPressed; }
 }

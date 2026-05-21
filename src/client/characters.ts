@@ -216,7 +216,8 @@ function persona1(ctx: CanvasRenderingContext2D, x, y, w, h, style: any = {}) {
     ctx.fill();
     
     // star on hat
-    drawStar(ctx, 0, startY + hatH*0.5, 5, 5, 8);
+    const starSize = w * 0.08;
+    drawStar(ctx, 0, startY + hatH*0.5, 5, starSize, starSize * 1.6);
 
     // +head
     const headH = h * 0.3;
@@ -233,7 +234,7 @@ function persona1(ctx: CanvasRenderingContext2D, x, y, w, h, style: any = {}) {
     ctx.fill();
 
     // +eyes
-    const eyeSize = 4;
+    const eyeSize = w * 0.04;
     ctx.beginPath();
     ctx.fillStyle = "#000000";
     ctx.rect(startX + w*0.25, headStartY + headH*0.3, eyeSize, eyeSize);
@@ -440,12 +441,14 @@ function draw11(ctx: CanvasRenderingContext2D, x, y, w, h, style: any = {}) {
     ctx.beginPath();
     ctx.fillStyle = "#100712";
     ctx.rect(startX, legStartY, w, legH/3); // top
-    ctx.rect(startX, legStartY, legW, legH); // left leg
-    ctx.rect(startX + w - legW, legStartY, legW, legH); // right leg
+    const legBottomStartY = legStartY + legH/3;
+    const legBottomH = legH - legH/3;
+    ctx.rect(startX, legBottomStartY, legW, legBottomH); // left leg
+    ctx.rect(startX + w - legW, legBottomStartY, legW, legBottomH); // right leg
     ctx.fill();
     // -legs
 
-    const beltH = Math.max(3, h * 0.03);
+    const beltH = h * 0.03;
 
     ctx.beginPath();
     ctx.fillStyle = "#4e402f";
@@ -549,18 +552,18 @@ function drawPersonaggio10(ctx: CanvasRenderingContext2D, x, y, w, h, style: any
 
     ctx.fillStyle = alienDark;
     ctx.beginPath();
-    ctx.ellipse(headCx - w * 0.18, startY - h * 0.06, w * 0.06, h * 0.16, -0.45, 0, Math.PI * 2);
-    ctx.ellipse(headCx + w * 0.18, startY - h * 0.06, w * 0.06, h * 0.16, 0.45, 0, Math.PI * 2);
+    ctx.ellipse(headCx - w * 0.18, startY - h * 0.08, w * 0.06, h * 0.14, -0.45, 0, Math.PI * 2);
+    ctx.ellipse(headCx + w * 0.18, startY - h * 0.08, w * 0.06, h * 0.14, 0.45, 0, Math.PI * 2);
     ctx.fill();
 
     ctx.strokeStyle = alienDark;
-    ctx.lineWidth = Math.max(2, Math.min(w, h) * 0.06);
+    ctx.lineWidth = Math.min(w, h) * 0.03;
     ctx.lineCap = "round";
     ctx.beginPath();
     ctx.moveTo(headCx - w * 0.12, startY - h * 0.01);
-    ctx.quadraticCurveTo(headCx - w * 0.26, startY - h * 0.18, headCx - w * 0.31, startY - h * 0.3);
+    ctx.quadraticCurveTo(headCx - w * 0.26, startY - h * 0.15, headCx - w * 0.31, startY - h * 0.28);
     ctx.moveTo(headCx + w * 0.12, startY - h * 0.01);
-    ctx.quadraticCurveTo(headCx + w * 0.26, startY - h * 0.18, headCx + w * 0.31, startY - h * 0.3);
+    ctx.quadraticCurveTo(headCx + w * 0.26, startY - h * 0.15, headCx + w * 0.31, startY - h * 0.28);
     ctx.stroke();
 
     ctx.fillStyle = alienRed;
@@ -811,14 +814,17 @@ function drawBatman(ctx: CanvasRenderingContext2D, x, y, w, h, style: any = {}) 
     ctx.beginPath();
     ctx.fillStyle = "#333333";
     // Spalle più arrotondate
-    ctx.roundRect(startX, bodyStartY, w, bodyH, [10, 10, 0, 0]);
+    const shoulderRadius = w * 0.05;
+    ctx.roundRect(startX, bodyStartY, w, bodyH, [shoulderRadius, shoulderRadius, 0, 0]);
     ctx.fill();
 
     // Braccia muscolose
     const armW = w * 0.35;
+    const armPad = w * 0.025;
+    const armRadius = w * 0.04;
     ctx.beginPath();
-    ctx.roundRect(startX - armW + 5, bodyStartY + 5, armW, bodyH * 0.6, 8); // Braccio sx
-    ctx.roundRect(startX + w - 5, bodyStartY + 5, armW, bodyH * 0.6, 8); // Braccio dx
+    ctx.roundRect(startX - armW + armPad, bodyStartY + armPad, armW, bodyH * 0.6, armRadius); // Braccio sx
+    ctx.roundRect(startX + w - armPad, bodyStartY + armPad, armW, bodyH * 0.6, armRadius); // Braccio dx
     ctx.fill();
 
     // --- TESTA (Maschera Sagomata) ---
@@ -877,17 +883,19 @@ function drawBatman(ctx: CanvasRenderingContext2D, x, y, w, h, style: any = {}) 
     const beltY = bodyStartY + bodyH - (bodyH * 0.2);
     ctx.fillRect(startX, beltY, w, bodyH * 0.18);
     // Tasche sulla cintura
+    const pocketPad = w * 0.01;
     ctx.fillStyle = "#b8952e";
     for(let i=0; i<4; i++) {
-        ctx.fillRect(startX + (i * w/4) + 2, beltY + 2, w/4 - 4, bodyH * 0.14);
+        ctx.fillRect(startX + (i * w/4) + pocketPad, beltY + pocketPad, w/4 - pocketPad * 2, bodyH * 0.14);
     }
 
     // --- GAMBE ---
     const legW = w * 0.38;
+    const bootRadius = w * 0.025;
     ctx.fillStyle = "#111111";
     ctx.beginPath();
-    ctx.roundRect(startX, legStartY, legW, legH, [0, 0, 5, 5]);
-    ctx.roundRect(startX + w - legW, legStartY, legW, legH, [0, 0, 5, 5]);
+    ctx.roundRect(startX, legStartY, legW, legH, [0, 0, bootRadius, bootRadius]);
+    ctx.roundRect(startX + w - legW, legStartY, legW, legH, [0, 0, bootRadius, bootRadius]);
     ctx.fill();
 
     ctx.restore();
@@ -911,7 +919,7 @@ function drawPersona7(ctx: CanvasRenderingContext2D, x, y, w, h, style: any = {}
 
     // ombra a terra
     ctx.beginPath();
-    ctx.ellipse(0, startY + h + 4, w * 0.7, 6, 0, 0, Math.PI * 2);
+    ctx.ellipse(0, startY + h + h * 0.02, w * 0.7, h * 0.03, 0, 0, Math.PI * 2);
     ctx.fillStyle = `rgba(0, 255, 200, ${0.15 + 0.1 * glow})`;
     ctx.fill();
 
@@ -929,16 +937,18 @@ function drawPersona7(ctx: CanvasRenderingContext2D, x, y, w, h, style: any = {}
     const headH = h * 0.28;
 
     // cappuccio (triangolo arrotondato)
+    const hoodOffset = w * 0.03;
     ctx.beginPath();
-    ctx.moveTo(startX - 6, startY + headH + 2);
-    ctx.quadraticCurveTo(startX + w / 2, startY - 18, startX + w + 6, startY + headH + 2);
+    ctx.moveTo(startX - hoodOffset, startY + headH + hoodOffset * 0.3);
+    ctx.quadraticCurveTo(startX + w / 2, startY - w * 0.1, startX + w + hoodOffset, startY + headH + hoodOffset * 0.3);
     ctx.closePath();
     ctx.fillStyle = darkHood;
     ctx.fill();
 
     // visiera / maschera
+    const borderRadius = w * 0.02;
     ctx.beginPath();
-    ctx.roundRect(startX + w * 0.08, startY + headH * 0.3, w * 0.84, headH * 0.5, 4);
+    ctx.roundRect(startX + w * 0.08, startY + headH * 0.3, w * 0.84, headH * 0.5, borderRadius);
     ctx.fillStyle = darkBase;
     ctx.fill();
 
@@ -948,7 +958,7 @@ function drawPersona7(ctx: CanvasRenderingContext2D, x, y, w, h, style: any = {}
     const eyeH = w * 0.06;
 
     ctx.shadowColor = neonSolid;
-    ctx.shadowBlur = 15 + 8 * glow;
+    ctx.shadowBlur = w * 0.08 + w * 0.04 * glow;
 
     // occhio sinistro
     ctx.beginPath();
@@ -975,14 +985,15 @@ function drawPersona7(ctx: CanvasRenderingContext2D, x, y, w, h, style: any = {}
     ctx.fill();
 
     // piastre armatura
+    const armorPad = w * 0.015;
     ctx.fillStyle = "#1e2d50";
-    ctx.fillRect(startX + 3, bodyStartY + 3, w - 6, bodyH * 0.45);
+    ctx.fillRect(startX + armorPad, bodyStartY + armorPad, w - armorPad * 2, bodyH * 0.45);
 
     // V neon sul petto
     ctx.shadowColor = neonSolid;
-    ctx.shadowBlur = 10 * glow;
+    ctx.shadowBlur = w * 0.05 * glow;
     ctx.strokeStyle = neon;
-    ctx.lineWidth = 2.5;
+    ctx.lineWidth = w * 0.015;
     ctx.beginPath();
     ctx.moveTo(startX + w * 0.1, bodyStartY + bodyH * 0.08);
     ctx.lineTo(startX + w * 0.5, bodyStartY + bodyH * 0.45);
@@ -990,14 +1001,16 @@ function drawPersona7(ctx: CanvasRenderingContext2D, x, y, w, h, style: any = {}
     ctx.stroke();
 
     // linea orizzontale cintura
+    const beltPad = w * 0.02;
     ctx.beginPath();
-    ctx.moveTo(startX + 4, bodyStartY + bodyH * 0.7);
-    ctx.lineTo(startX + w - 4, bodyStartY + bodyH * 0.7);
+    ctx.moveTo(startX + beltPad, bodyStartY + bodyH * 0.7);
+    ctx.lineTo(startX + w - beltPad, bodyStartY + bodyH * 0.7);
     ctx.stroke();
 
     // cerchio energia al centro cintura
+    const beltCircleR = w * 0.02;
     ctx.beginPath();
-    ctx.arc(startX + w / 2, bodyStartY + bodyH * 0.7, 4, 0, Math.PI * 2);
+    ctx.arc(startX + w / 2, bodyStartY + bodyH * 0.7, beltCircleR, 0, Math.PI * 2);
     ctx.fillStyle = neonSolid;
     ctx.fill();
 
@@ -1010,47 +1023,49 @@ function drawPersona7(ctx: CanvasRenderingContext2D, x, y, w, h, style: any = {}
 
     // bande neon sulle braccia
     ctx.shadowColor = neonSolid;
-    ctx.shadowBlur = 6 * glow;
+    ctx.shadowBlur = w * 0.03 * glow;
     ctx.fillStyle = neon;
     ctx.fillRect(startX - armLen * 0.65, bodyStartY + bodyH * 0.08, armLen * 0.15, bodyH * 0.24);
     ctx.fillRect(startX + w + armLen * 0.5, bodyStartY + bodyH * 0.08, armLen * 0.15, bodyH * 0.24);
 
     // mani
     ctx.shadowBlur = 0;
+    const handW = w * 0.03;
     ctx.fillStyle = "#222";
-    ctx.fillRect(startX - armLen - 3, bodyStartY + bodyH * 0.05, 6, bodyH * 0.3);
-    ctx.fillRect(startX + w + armLen - 3, bodyStartY + bodyH * 0.05, 6, bodyH * 0.3);
+    ctx.fillRect(startX - armLen - handW * 0.5, bodyStartY + bodyH * 0.05, handW, bodyH * 0.3);
+    ctx.fillRect(startX + w + armLen - handW * 0.5, bodyStartY + bodyH * 0.05, handW, bodyH * 0.3);
 
     // === SPADA ENERGETICA ===
-    const swordX = startX + w + armLen + 2;
+    const swordX = startX + w + armLen + w * 0.01;
     const swordHandleTop = bodyStartY + bodyH * 0.05;
 
     // impugnatura
+    const swordHandleW = w * 0.02;
     ctx.fillStyle = "#555";
-    ctx.fillRect(swordX - 2, swordHandleTop, 4, bodyH * 0.3);
+    ctx.fillRect(swordX - swordHandleW * 0.5, swordHandleTop, swordHandleW, bodyH * 0.3);
 
     // guardia
     ctx.fillStyle = "#888";
-    ctx.fillRect(swordX - 6, swordHandleTop - 2, 12, 4);
+    ctx.fillRect(swordX - w * 0.03, swordHandleTop - w * 0.01, w * 0.06, w * 0.02);
 
     // lama energia
     ctx.shadowColor = "#ff0050";
-    ctx.shadowBlur = 14 + 6 * glow;
+    ctx.shadowBlur = w * 0.07 + w * 0.03 * glow;
     const bladeGrad = ctx.createLinearGradient(0, swordHandleTop - headH, 0, swordHandleTop);
     bladeGrad.addColorStop(0, `rgba(255, 0, 80, ${0.3 + 0.2 * glow})`);
     bladeGrad.addColorStop(1, "#ff0050");
     ctx.strokeStyle = bladeGrad;
-    ctx.lineWidth = 3;
+    ctx.lineWidth = w * 0.015;
     ctx.beginPath();
-    ctx.moveTo(swordX, swordHandleTop - 2);
+    ctx.moveTo(swordX, swordHandleTop - w * 0.01);
     ctx.lineTo(swordX, swordHandleTop - headH * 1.2);
     ctx.stroke();
 
     // nucleo lama (bianco)
     ctx.strokeStyle = `rgba(255, 200, 220, ${0.6 + 0.4 * glow})`;
-    ctx.lineWidth = 1;
+    ctx.lineWidth = w * 0.005;
     ctx.beginPath();
-    ctx.moveTo(swordX, swordHandleTop - 2);
+    ctx.moveTo(swordX, swordHandleTop - w * 0.01);
     ctx.lineTo(swordX, swordHandleTop - headH * 1.2);
     ctx.stroke();
 
@@ -1071,24 +1086,27 @@ function drawPersona7(ctx: CanvasRenderingContext2D, x, y, w, h, style: any = {}
     ctx.fillRect(startX + w - legW, legStartY, legW, legH);
 
     // ginocchiere neon
+    const kneeH = h * 0.015;
     ctx.shadowColor = neonSolid;
-    ctx.shadowBlur = 5 * glow;
+    ctx.shadowBlur = w * 0.025 * glow;
     ctx.fillStyle = neon;
-    ctx.fillRect(startX + legW * 0.2, legStartY + legH * 0.4, legW * 0.6, 3);
-    ctx.fillRect(startX + w - legW + legW * 0.2, legStartY + legH * 0.4, legW * 0.6, 3);
+    ctx.fillRect(startX + legW * 0.2, legStartY + legH * 0.4, legW * 0.6, kneeH);
+    ctx.fillRect(startX + w - legW + legW * 0.2, legStartY + legH * 0.4, legW * 0.6, kneeH);
     ctx.shadowBlur = 0;
 
     // stivali
+    const bootPad = w * 0.015;
     ctx.fillStyle = darkMid;
-    ctx.fillRect(startX - 3, legStartY + legH * 0.78, legW + 6, legH * 0.22);
-    ctx.fillRect(startX + w - legW - 3, legStartY + legH * 0.78, legW + 6, legH * 0.22);
+    ctx.fillRect(startX - bootPad, legStartY + legH * 0.78, legW + bootPad * 2, legH * 0.22);
+    ctx.fillRect(startX + w - legW - bootPad, legStartY + legH * 0.78, legW + bootPad * 2, legH * 0.22);
 
     // suole neon
+    const soleH = h * 0.01;
     ctx.shadowColor = neonSolid;
-    ctx.shadowBlur = 4 * glow;
+    ctx.shadowBlur = w * 0.02 * glow;
     ctx.fillStyle = neon;
-    ctx.fillRect(startX - 3, legStartY + legH - 2, legW + 6, 2);
-    ctx.fillRect(startX + w - legW - 3, legStartY + legH - 2, legW + 6, 2);
+    ctx.fillRect(startX - bootPad, legStartY + legH - soleH, legW + bootPad * 2, soleH);
+    ctx.fillRect(startX + w - legW - bootPad, legStartY + legH - soleH, legW + bootPad * 2, soleH);
     ctx.shadowBlur = 0;
 
     ctx.restore();
@@ -1118,9 +1136,10 @@ function drawPersona4(ctx: CanvasRenderingContext2D, x, y, w, h, style = {}) {
     ctx.fill();
 
     // occhi
+    const eyeSize = w * 0.04;
     ctx.fillStyle = "#000";
-    ctx.fillRect(startX + w * 0.25, startY + headH * 0.55, 4, 4);
-    ctx.fillRect(startX + w * 0.65, startY + headH * 0.55, 4, 4);
+    ctx.fillRect(startX + w * 0.25, startY + headH * 0.55, eyeSize, eyeSize);
+    ctx.fillRect(startX + w * 0.65, startY + headH * 0.55, eyeSize, eyeSize);
 
     // corpo
     const bodyStartY = startY + headH;
@@ -1149,10 +1168,11 @@ function drawPersona4(ctx: CanvasRenderingContext2D, x, y, w, h, style = {}) {
     ctx.fill();
 
     // scarpe
+    const shoeH = h * 0.03;
     ctx.beginPath();
     ctx.fillStyle = "#000";
-    ctx.rect(startX, legStartY + legH - 5, legW, 5);
-    ctx.rect(startX + w - legW, legStartY + legH - 5, legW, 5);
+    ctx.rect(startX, legStartY + legH - shoeH, legW, shoeH);
+    ctx.rect(startX + w - legW, legStartY + legH - shoeH, legW, shoeH);
     ctx.fill();
 
     ctx.restore();
@@ -1313,7 +1333,7 @@ function drawClashRoyaleKnight(ctx: CanvasRenderingContext2D, x, y, w, h, style 
     // Bocca
     ctx.beginPath();
     ctx.strokeStyle = "#000000";
-    ctx.lineWidth = 1;
+    ctx.lineWidth = w * 0.005;
     ctx.moveTo(startX + w*0.25, startY + headH*0.75);
     ctx.lineTo(startX + w*0.75, startY + headH*0.75);
     ctx.stroke();
@@ -1333,7 +1353,7 @@ function drawClashRoyaleKnight(ctx: CanvasRenderingContext2D, x, y, w, h, style 
     // Dettagli armatura (crocchia)
     ctx.beginPath();
     ctx.strokeStyle = "#2a2a2a";
-    ctx.lineWidth = 2;
+    ctx.lineWidth = w * 0.01;
     ctx.moveTo(startX + w*0.25, bodyStartY);
     ctx.lineTo(startX + w*0.25, bodyStartY + bodyH);
     ctx.moveTo(startX + w*0.75, bodyStartY);
@@ -1341,44 +1361,47 @@ function drawClashRoyaleKnight(ctx: CanvasRenderingContext2D, x, y, w, h, style 
     ctx.stroke();
 
     // Braccia con armatura
+    const armPad2 = w * 0.025;
     ctx.beginPath();
     ctx.fillStyle = "#4a4a4a";
-    ctx.rect(startX - armLen, bodyStartY + 5, armLen - 5, 0.4*bodyH);
-    ctx.rect(startX + w + 5, bodyStartY + 5, armLen - 5, 0.4*bodyH);
+    ctx.rect(startX - armLen, bodyStartY + armPad2, armLen - armPad2, 0.4*bodyH);
+    ctx.rect(startX + w + armPad2, bodyStartY + armPad2, armLen - armPad2, 0.4*bodyH);
     ctx.fill();
 
     // Guanti scuri
+    const gloveR = w * 0.025;
     ctx.beginPath();
     ctx.fillStyle = "#1a1a1a";
-    ctx.arc(startX - armLen + 3, bodyStartY + 0.2*bodyH, 5, 0, Math.PI * 2);
-    ctx.arc(startX + w + armLen - 3, bodyStartY + 0.2*bodyH, 5, 0, Math.PI * 2);
+    ctx.arc(startX - armLen + w * 0.015, bodyStartY + 0.2*bodyH, gloveR, 0, Math.PI * 2);
+    ctx.arc(startX + w + armLen - w * 0.015, bodyStartY + 0.2*bodyH, gloveR, 0, Math.PI * 2);
     ctx.fill();
 
     // Scudo sulla sinistra
+    const shieldW = w * 0.05;
     ctx.beginPath();
     ctx.fillStyle = "#3a3a3a";
-    ctx.rect(startX - armLen - 8, bodyStartY, 10, 0.6*bodyH);
+    ctx.rect(startX - armLen - w * 0.04, bodyStartY, shieldW, 0.6*bodyH);
     ctx.fill();
     
     ctx.beginPath();
     ctx.fillStyle = "#ffd700";
-    ctx.rect(startX - armLen - 6, bodyStartY + 5, 6, 0.5*bodyH);
+    ctx.rect(startX - armLen - w * 0.03, bodyStartY + w * 0.025, w * 0.03, 0.5*bodyH);
     ctx.fill();
 
     // Spada sulla destra
     ctx.beginPath();
     ctx.strokeStyle = "#c0c0c0";
-    ctx.lineWidth = 3;
+    ctx.lineWidth = w * 0.015;
     ctx.moveTo(startX + w + armLen, bodyStartY);
-    ctx.lineTo(startX + w + armLen + 5, bodyStartY - 15);
+    ctx.lineTo(startX + w + armLen + w * 0.025, bodyStartY - h * 0.08);
     ctx.stroke();
 
     // Punta spada
     ctx.beginPath();
     ctx.fillStyle = "#c0c0c0";
-    ctx.moveTo(startX + w + armLen + 5, bodyStartY - 15);
-    ctx.lineTo(startX + w + armLen + 8, bodyStartY - 25);
-    ctx.lineTo(startX + w + armLen + 2, bodyStartY - 18);
+    ctx.moveTo(startX + w + armLen + w * 0.025, bodyStartY - h * 0.08);
+    ctx.lineTo(startX + w + armLen + w * 0.04, bodyStartY - h * 0.13);
+    ctx.lineTo(startX + w + armLen + w * 0.01, bodyStartY - h * 0.09);
     ctx.fill();
     // -body
 
@@ -1410,8 +1433,9 @@ function drawClashRoyaleKnight(ctx: CanvasRenderingContext2D, x, y, w, h, style 
     // Dettagli stivali (dorature)
     ctx.beginPath();
     ctx.fillStyle = "#ffd700";
-    ctx.rect(startX + 3, legStartY + legH*0.75, legW - 6, 3);
-    ctx.rect(startX + w - legW + 3, legStartY + legH*0.75, legW - 6, 3);
+    const bootTrim = w * 0.015;
+    ctx.rect(startX + bootTrim, legStartY + legH*0.75, legW - bootTrim * 2, h * 0.015);
+    ctx.rect(startX + w - legW + bootTrim, legStartY + legH*0.75, legW - bootTrim * 2, h * 0.015);
     ctx.fill();
     // -legs
 
